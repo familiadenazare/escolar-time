@@ -1,7 +1,7 @@
 import { db } from '@/lib/db'
 import { requireProfile } from '@/lib/auth/session'
 import { isDiaryStatus, type DiaryStatus } from '@/lib/diaries/status'
-import type { CheckInput, ClassInput, ExtraRowInput } from '@/lib/diaries/rows'
+import type { CheckInput, ClassInput, ExtraRowInput, ReadingInput } from '@/lib/diaries/rows'
 import { DiariesBoard } from '@/components/diaries/diaries-board'
 
 export default async function DiariesPage({
@@ -83,6 +83,32 @@ export default async function DiariesPage({
       .catch((e) => fail(e, [] as ExtraRowInput[])),
   ])
 
+  // Leituras do robô no Escolar, já com os vínculos (só as ligadas a turma e disciplina daqui).
+  const [readings, linkStats] = await Promise.all([
+    db
+      .query<ReadingInput>(
+        `SELECT lt.local_id AS "classGroupId", ld.local_id AS "subjectId", lp.local_id AS "teacherId",
+                r.month, r.lessons, r.planned, r.given, r.read_at AS "readAt", ld.name AS "emDisciplina"
+           FROM diary_readings r
+           JOIN em_links lt ON lt.tenant_id = r.tenant_id AND lt.kind = 'turma' AND lt.em_key = r.em_turma_key
+                           AND lt.local_id IS NOT NULL AND NOT lt.ignored
+           JOIN em_links ld ON ld.tenant_id = r.tenant_id AND ld.kind = 'disciplina' AND ld.em_key = r.em_disciplina_key
+                           AND ld.local_id IS NOT NULL AND NOT ld.ignored
+           LEFT JOIN em_links lp ON lp.tenant_id = r.tenant_id AND lp.kind = 'professor' AND lp.em_key = r.em_professor_key
+                                AND NOT lp.ignored
+          WHERE r.tenant_id = $1 AND r.year = $2`,
+        [tenantId, year],
+      )
+      .catch((e) => fail(e, [] as ReadingInput[])),
+    db
+      .one<{ pending: number; last_read: string | null }>(
+        `SELECT (SELECT count(*)::int FROM em_links WHERE tenant_id = $1 AND local_id IS NULL AND NOT ignored) AS pending,
+                (SELECT max(read_at) FROM diary_readings WHERE tenant_id = $1) AS last_read`,
+        [tenantId],
+      )
+      .catch((e) => fail(e, null)),
+  ])
+
   const validChecks: CheckInput[] = checks
     .filter((c) => isDiaryStatus(c.status))
     .map((c) => ({ ...c, status: c.status as DiaryStatus }))
@@ -98,6 +124,9 @@ export default async function DiariesPage({
       subjects={subjects}
       checks={validChecks}
       extraRows={extraRows}
+      readings={readings}
+      pendingLinks={linkStats?.pending ?? 0}
+      lastRead={linkStats?.last_read ?? null}
       loadError={loadError}
     />
   )

@@ -21,10 +21,11 @@ export default async function DashboardLayout({
         <Sidebar
           userName={profile.name || profile.email}
           userEmail={profile.email}
+          role={profile.role}
           isAdmin={profile.role === 'ADMIN'}
           canEdit={editor}
         />
-        <main className="flex-1 bg-white overflow-y-auto">
+        <main className="flex-1 overflow-y-auto bg-paper">
           <div className="p-8">
             {children}
           </div>

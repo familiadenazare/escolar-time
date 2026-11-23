@@ -6,7 +6,7 @@ import { LoginForm } from './login-form'
 describe('LoginForm', () => {
   it('leva ao login do Google pelo próprio app', () => {
     render(<LoginForm />)
-    expect(screen.getByRole('button', { name: /entrar com google/i })).toHaveAttribute('href', '/auth/google')
+    expect(screen.getByRole('button', { name: /login com o google/i })).toHaveAttribute('href', '/auth/google')
     expect(screen.queryByLabelText(/senha/i)).toBeNull()
   })
 

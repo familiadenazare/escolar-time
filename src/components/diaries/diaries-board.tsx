@@ -2,7 +2,8 @@
 
 import { useMemo, useState, useTransition } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
-import { History, Loader2, PaintBucket, Plus, Trash2, UserX, X } from 'lucide-react'
+import Link from 'next/link'
+import { Bot, History, Link2, Loader2, PaintBucket, Plus, Trash2, UserX, X } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { useCanEdit } from '@/components/auth/can-edit'
@@ -17,6 +18,7 @@ import {
   type DiaryStatus,
 } from '@/lib/diaries/status'
 import {
+  attachReadings,
   buildDiaryRows,
   cellKey,
   checksToCells,
@@ -29,7 +31,11 @@ import {
   type DiaryRow,
   type ExtraRowInput,
   type NamedRef,
+  type ReadingInput,
+  type RowReading,
 } from '@/lib/diaries/rows'
+import { readingLevel } from '@/lib/diaries/escolar'
+import { formatDateTime } from '@/lib/format-date'
 import {
   addExtraRow,
   bulkSetDiaryCells,
@@ -102,6 +108,9 @@ export function DiariesBoard({
   subjects,
   checks,
   extraRows: initialExtraRows,
+  readings,
+  pendingLinks,
+  lastRead,
   loadError,
 }: {
   year: number
@@ -112,6 +121,9 @@ export function DiariesBoard({
   subjects: NamedRef[]
   checks: CheckInput[]
   extraRows: ExtraRowInput[]
+  readings: ReadingInput[]
+  pendingLinks: number
+  lastRead: string | null
   loadError: string | null
 }) {
   const canEdit = useCanEdit()
@@ -156,6 +168,13 @@ export function DiariesBoard({
     }
     return buildDiaryRows({ classes, teachers, subjects, checks: cellChecks, extraRows })
   }, [classes, teachers, subjects, cells, extraRows])
+
+  // Leitura do robô no Escolar, ligada à linha certa de cada turma.
+  const subjectNameById = useMemo(() => new Map(subjects.map((s) => [s.id, s.name])), [subjects])
+  const readingCells = useMemo(
+    () => attachReadings(rowsByClass, readings, subjectNameById).cells,
+    [rowsByClass, readings, subjectNameById],
+  )
 
   const visibleClasses = useMemo(
     () =>
@@ -301,6 +320,8 @@ export function DiariesBoard({
         </div>
       )}
 
+      <RobotBanner lastRead={lastRead} pendingLinks={pendingLinks} canEdit={canEdit} />
+
       {/* Filtros */}
       <div className="flex flex-wrap items-end gap-3 rounded-lg border border-border bg-surface px-4 py-3">
         <Field label="Unidade">
@@ -418,6 +439,7 @@ export function DiariesBoard({
                 unitLabel={unitId ? '' : unitShort(unitById.get(cls.unitId))}
                 rows={rows}
                 cells={cells}
+                readings={readingCells}
                 currentMonth={year === now.getFullYear() ? now.getMonth() + 1 : 0}
                 focusMonth={focusMonth}
                 canEdit={canEdit}
@@ -436,6 +458,7 @@ export function DiariesBoard({
           key={cellKey(popover.rowKey, popover.month)}
           target={popover}
           value={cells.get(cellKey(popover.rowKey, popover.month))}
+          reading={readingCells.get(cellKey(popover.rowKey, popover.month))}
           onSelect={onPopoverSelect}
           onClose={closePopover}
         />
@@ -511,6 +534,44 @@ export function DiariesBoard({
   )
 }
 
+// ─── leitura do robô ────────────────────────────────────────────────────────
+
+function RobotBanner({ lastRead, pendingLinks, canEdit }: { lastRead: string | null; pendingLinks: number; canEdit: boolean }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-border bg-white px-4 py-2.5 text-sm">
+      <div className="flex min-w-0 flex-1 items-start gap-2 text-slate">
+        <Bot className="mt-0.5 h-4 w-4 flex-none text-navy" />
+        <p className="min-w-0">
+          {lastRead ? (
+            <>
+              Leitura do Escolar Manager pelo robô em{' '}
+              <b className="font-semibold text-navy">{formatDateTime(lastRead)}</b>. Cada célula mostra chamada (ch) e
+              conteúdo (ct) lançados nas aulas que já passaram.
+            </>
+          ) : (
+            'O robô ainda não enviou leituras do Escolar Manager. Por enquanto a conferência é só manual.'
+          )}
+        </p>
+      </div>
+      {pendingLinks > 0 && (
+        <Link
+          href="/dashboard/diaries/vinculos"
+          className="ml-auto flex items-center gap-1.5 rounded-full bg-gold-soft px-3 py-1 text-xs font-semibold text-ocre-dark hover:bg-ocre/20"
+        >
+          <Link2 className="h-3.5 w-3.5" />
+          {pendingLinks} {pendingLinks === 1 ? 'nome do Escolar sem vínculo' : 'nomes do Escolar sem vínculo'}
+          {canEdit ? ' — vincular' : ''}
+        </Link>
+      )}
+      {pendingLinks === 0 && lastRead && (
+        <Link href="/dashboard/diaries/vinculos" className="ml-auto text-xs text-slate underline-offset-2 hover:text-navy hover:underline">
+          Vínculos com o Escolar
+        </Link>
+      )}
+    </div>
+  )
+}
+
 // ─── resumo ─────────────────────────────────────────────────────────────────
 
 function MonthSummaryBar({ summary, month }: { summary: ReturnType<typeof summarizeMonth>; month: number }) {
@@ -577,6 +638,7 @@ function ClassTable({
   unitLabel,
   rows,
   cells,
+  readings,
   currentMonth,
   focusMonth,
   canEdit,
@@ -589,6 +651,7 @@ function ClassTable({
   unitLabel: string
   rows: DiaryRow[]
   cells: Map<string, CellValue>
+  readings: Map<string, RowReading>
   currentMonth: number
   focusMonth: number
   canEdit: boolean
@@ -693,11 +756,24 @@ function ClassTable({
                   const key = cellKey(row.key, month)
                   const cell = cells.get(key)
                   const info = cell ? DIARY_STATUS_INFO[cell.status] : null
-                  const tip = cell
-                    ? `${info!.label}${cell.notes ? ` — ${cell.notes}` : ''}`
-                    : canEdit
-                      ? 'Clique para marcar'
-                      : 'Não verificado'
+                  const reading = readings.get(key)
+                  const level = reading ? readingLevel(reading.summary) : null
+                  const readingText = reading
+                    ? reading.summary.lessons === 0
+                      ? 'sem aulas'
+                      : `ch ${reading.summary.attendance}/${reading.summary.lessons} · ct ${reading.summary.content}/${reading.summary.lessons}`
+                    : null
+                  const readingTip = reading
+                    ? reading.summary.lessons === 0
+                      ? 'Escolar: nenhuma aula até a data da leitura'
+                      : `Escolar: chamada em ${reading.summary.attendance} e conteúdo em ${reading.summary.content} de ${reading.summary.lessons} aulas`
+                    : null
+                  const tip = [
+                    cell ? `${info!.label}${cell.notes ? ` — ${cell.notes}` : ''}` : canEdit ? 'Clique para marcar' : 'Não verificado',
+                    readingTip,
+                  ]
+                    .filter(Boolean)
+                    .join('\n')
                   return (
                     <td key={m} className={cn('p-0.5', month === focusMonth && 'bg-ocre/10')}>
                       <button
@@ -705,16 +781,32 @@ function ClassTable({
                         disabled={!canEdit}
                         onClick={(e) => onCellClick(e, row, month)}
                         title={tip}
-                        aria-label={`${row.subjectLabel}, ${row.teacherName}, ${MONTHS[i]}: ${cell ? info!.label : 'não verificado'}`}
+                        aria-label={`${row.subjectLabel}, ${row.teacherName}, ${MONTHS[i]}: ${cell ? info!.label : 'não verificado'}${readingTip ? `. ${readingTip}` : ''}`}
                         className={cn(
-                          'relative flex h-8 w-full items-center justify-center rounded px-1 text-[11px] font-medium leading-tight',
+                          'relative flex w-full flex-col items-center justify-center rounded px-1 text-[11px] font-medium leading-tight',
+                          reading ? 'h-10' : 'h-8',
                           info ? info.cell : 'text-slate-300',
+                          !info && level && 'border bg-white',
+                          !info && level === 'full' && 'border-emerald-300',
+                          !info && level === 'partial' && 'border-amber-300',
+                          !info && level === 'empty' && 'border-red-300',
+                          !info && level === 'none' && 'border-slate-200',
                           canEdit && 'cursor-pointer hover:ring-2 hover:ring-navy/30',
                           !info && canEdit && 'hover:bg-surface hover:text-slate',
                           activeCell === key && 'ring-2 ring-navy',
                         )}
                       >
-                        {info ? info.short : '·'}
+                        {info ? <span>{info.short}</span> : !reading && '·'}
+                        {readingText && (
+                          <span
+                            className={cn(
+                              'whitespace-nowrap text-[9.5px] font-normal tabular-nums',
+                              info ? 'opacity-80' : 'text-slate',
+                            )}
+                          >
+                            {readingText}
+                          </span>
+                        )}
                         {cell?.notes && (
                           <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-navy" aria-hidden />
                         )}

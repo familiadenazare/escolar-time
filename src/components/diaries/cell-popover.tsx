@@ -1,13 +1,16 @@
 'use client'
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Eraser } from 'lucide-react'
+import { Bot, Check, Eraser, X as XIcon } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { DIARY_STATUSES, DIARY_STATUS_INFO, monthName, type DiaryStatus } from '@/lib/diaries/status'
-import type { CellValue } from '@/lib/diaries/rows'
+import type { CellValue, RowReading } from '@/lib/diaries/rows'
+import { saoPauloDate, suggestStatus } from '@/lib/diaries/escolar'
+import { formatDateTime } from '@/lib/format-date'
 
 const WIDTH = 288
+const WIDTH_WITH_READING = 560
 
 export type PopoverTarget = {
   rowKey: string
@@ -19,16 +22,20 @@ export type PopoverTarget = {
 
 /**
  * Menu da célula: escolher a situação grava na hora (atalhos 1–8, 0 limpa).
- * A observação é gravada junto com a situação escolhida.
+ * A observação é gravada junto com a situação escolhida. Com leitura do robô,
+ * mostra ao lado o que está lançado no Escolar aula a aula e destaca a
+ * situação que a leitura sugere — quem decide é a pessoa.
  */
 export function CellPopover({
   target,
   value,
+  reading,
   onSelect,
   onClose,
 }: {
   target: PopoverTarget
   value: CellValue | undefined
+  reading?: RowReading
   onSelect: (status: DiaryStatus | null, notes: string | null) => void
   onClose: () => void
 }) {
@@ -36,16 +43,18 @@ export function CellPopover({
   const notesRef = useRef<HTMLTextAreaElement>(null)
   const [notes, setNotes] = useState(value?.notes ?? '')
   const [pos, setPos] = useState<{ top: number; left: number }>({ top: -9999, left: -9999 })
+  const width = reading ? WIDTH_WITH_READING : WIDTH
+  const suggested = reading ? suggestStatus(reading.summary) : null
 
   useLayoutEffect(() => {
     const h = ref.current?.offsetHeight ?? 360
     const { anchor } = target
-    let left = anchor.left + anchor.width / 2 - WIDTH / 2
-    left = Math.max(8, Math.min(left, window.innerWidth - WIDTH - 8))
+    let left = anchor.left + anchor.width / 2 - width / 2
+    left = Math.max(8, Math.min(left, window.innerWidth - width - 8))
     let top = anchor.bottom + 6
     if (top + h > window.innerHeight - 8) top = Math.max(8, anchor.top - h - 6)
     setPos({ top, left })
-  }, [target])
+  }, [target, width])
 
   useEffect(() => {
     function onDown(e: MouseEvent) {
@@ -92,8 +101,11 @@ export function CellPopover({
       role="dialog"
       aria-label={`Situação do diário em ${monthName(target.month)}`}
       className="fixed z-50 rounded-lg border border-border bg-white p-3 shadow-xl"
-      style={{ top: pos.top, left: pos.left, width: WIDTH }}
+      style={{ top: pos.top, left: pos.left, width: Math.min(width, window.innerWidth - 16) }}
     >
+      <div className={cn(reading && 'grid grid-cols-[1fr_256px] gap-4')}>
+      {reading && <ReadingPanel reading={reading} />}
+      <div>
       <div className="mb-2">
         <p className="text-sm font-semibold text-navy leading-tight">{target.title}</p>
         <p className="text-xs text-slate">
@@ -117,6 +129,9 @@ export function CellPopover({
               >
                 <span className={cn('h-3 w-3 shrink-0 rounded-full', info.dot)} />
                 <span className="flex-1">{info.label}</span>
+                {suggested === s && (
+                  <span className="rounded bg-gold-soft px-1.5 py-0.5 text-[10px] font-semibold text-ocre-dark">sugerido</span>
+                )}
                 <kbd className="text-[10px] text-slate">{i + 1}</kbd>
               </button>
             </li>
@@ -158,6 +173,82 @@ export function CellPopover({
             </button>
           )}
         </div>
+      </div>
+      </div>
+      </div>
+    </div>
+  )
+}
+
+/** O que o robô leu no Escolar Manager para este diário no mês. */
+function ReadingPanel({ reading }: { reading: RowReading }) {
+  const { summary } = reading
+  const asOf = saoPauloDate(reading.readAt)
+  return (
+    <div className="min-w-0 border-r border-border pr-4">
+      <p className="flex items-center gap-1.5 text-xs font-semibold text-navy">
+        <Bot className="h-3.5 w-3.5" /> No Escolar Manager
+      </p>
+      <p className="mb-2 text-[11px] text-slate">Lido em {formatDateTime(reading.readAt)}</p>
+      <dl className="mb-2 grid grid-cols-3 gap-1 text-center">
+        {(
+          [
+            ['Aulas', summary.lessons],
+            ['Chamada', summary.attendance],
+            ['Conteúdo', summary.content],
+          ] as const
+        ).map(([label, n]) => (
+          <div key={label} className="rounded-md bg-surface px-1 py-1">
+            <dt className="text-[10px] text-slate">{label}</dt>
+            <dd className="text-sm font-semibold tabular-nums text-navy">{n}</dd>
+          </div>
+        ))}
+      </dl>
+      {summary.upcoming > 0 && (
+        <p className="mb-2 text-[11px] text-slate">
+          + {summary.upcoming} {summary.upcoming === 1 ? 'aula futura' : 'aulas futuras'} (não contam)
+        </p>
+      )}
+      <div className="max-h-64 space-y-2 overflow-y-auto pr-1">
+        {reading.parts.map((part) => (
+          <div key={part.subjectLabel}>
+            {reading.parts.length > 1 && (
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-ocre-dark">{part.subjectLabel}</p>
+            )}
+            {part.lessons.length === 0 ? (
+              <p className="text-xs text-slate">Nenhuma aula no mês.</p>
+            ) : (
+              <ul className="divide-y divide-border text-xs">
+                {part.lessons.map((l, idx) => (
+                  <li
+                    key={`${l.date}-${idx}`}
+                    className={cn('flex items-start gap-2 py-1', l.date > asOf && 'opacity-50')}
+                    title={l.date > asOf ? 'Aula futura: não conta na conferência' : undefined}
+                  >
+                    <span className="w-10 shrink-0 tabular-nums text-slate">
+                      {l.date.slice(8, 10)}/{l.date.slice(5, 7)}
+                    </span>
+                    <span
+                      className={cn('mt-0.5 shrink-0', l.attendance ? 'text-emerald-600' : 'text-red-600')}
+                      title={l.attendance ? 'Chamada lançada' : 'Sem chamada'}
+                    >
+                      {l.attendance ? <Check className="h-3.5 w-3.5" /> : <XIcon className="h-3.5 w-3.5" />}
+                    </span>
+                    <span className={cn('min-w-0 flex-1', l.content?.trim() ? 'text-navy' : 'italic text-red-600')}>
+                      {l.content?.trim() || 'sem conteúdo'}
+                      {l.date > asOf && <span className="ml-1 text-[10px] not-italic text-slate">(futura)</span>}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {(part.planned != null || part.given != null) && (
+              <p className="mt-1 text-[11px] text-slate">
+                Previstas {part.planned ?? '—'} · realizadas {part.given ?? '—'} (período)
+              </p>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   )

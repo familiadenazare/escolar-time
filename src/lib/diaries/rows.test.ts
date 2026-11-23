@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  attachReadings,
   buildDiaryRows,
   cellKey,
   checksToCells,
@@ -121,5 +122,30 @@ describe('resumo e pendências', () => {
     const msg = pendingMessage(list[0], 9, 2026)
     expect(msg).toContain('setembro/2026')
     expect(msg).toContain('• 3º Ano A — Matemática: falta lançar o conteúdo (semana 2)')
+  })
+})
+
+describe('attachReadings', () => {
+  const rowsByClass = buildDiaryRows({ classes: [terceiroA], teachers, subjects, checks: [], extraRows: [] })
+  const names = new Map(subjects.map((s) => [s.id, s.name]))
+  const base = { teacherId: null, month: 11, planned: null, given: null, readAt: '2026-11-20T05:00:00Z' }
+
+  it('soma as disciplinas da regente na linha "Regente" e liga as demais à sua linha', () => {
+    const { cells, unattached } = attachReadings(
+      rowsByClass,
+      [
+        { ...base, classGroupId: 'c-3a', subjectId: 's-port', emDisciplina: 'PORTUGUÊS', lessons: [{ date: '2026-11-03', attendance: true, content: 'x' }] },
+        { ...base, classGroupId: 'c-3a', subjectId: 's-cien', emDisciplina: 'CIÊNCIAS', lessons: [{ date: '2026-11-04', attendance: false, content: null }] },
+        { ...base, classGroupId: 'c-3a', subjectId: 's-mat', emDisciplina: 'MATEMÁTICA', lessons: [] },
+        { ...base, classGroupId: 'c-3a', subjectId: 's-ing', emDisciplina: 'INGLÊS', lessons: [] },
+      ],
+      names,
+    )
+    const regente = cells.get(cellKey(rowKey('c-3a', 't-sarah', null), 11))!
+    expect(regente.summary).toEqual({ lessons: 2, attendance: 1, content: 1, upcoming: 0 })
+    expect(regente.parts.map((p) => p.subjectLabel)).toEqual(['Ciências', 'Língua Portuguesa'])
+    expect(cells.has(cellKey(rowKey('c-3a', 't-raynara', 's-mat'), 11))).toBe(true)
+    // Inglês não tem linha nesta turma.
+    expect(unattached).toBe(1)
   })
 })

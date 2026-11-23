@@ -58,7 +58,7 @@ export default async function DashboardPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-bold text-navy">Dashboard</h1>
+        <h1 className="text-3xl text-navy">Visão geral</h1>
         <p className="text-slate text-sm mt-1">
           Visão geral do sistema
         </p>

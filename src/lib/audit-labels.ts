@@ -32,6 +32,7 @@ export const AREA_LABELS: Record<string, string> = {
   generated_schedules: 'Horário',
   diary_checks: 'Verificação de diário',
   diary_extra_rows: 'Diário avulso',
+  em_links: 'Vínculo com o Escolar',
   profiles: 'Usuário',
   tenants: 'Instituição',
 }
@@ -93,6 +94,11 @@ const FIELD_LABELS: Record<string, string> = {
   config_snapshot: 'Configuração',
   violations: 'Violações',
   month: 'Mês',
+  kind: 'Tipo',
+  em_key: 'Chave no Escolar',
+  local_id: 'Cadastro daqui',
+  ignored: 'Não usar',
+  auto: 'Ligado sozinho',
 }
 
 export function fieldLabel(field: string): string {

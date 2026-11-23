@@ -1,4 +1,5 @@
 import { DIARY_STATUS_INFO, monthName, type DiaryStatus } from './status'
+import { addSummaries, saoPauloDate, summarizeLessons, type ReadingLesson, type ReadingSummary } from './escolar'
 
 /**
  * Monta as linhas da verificação de diários a partir dos cadastros do horário.
@@ -52,6 +53,7 @@ export type DiaryRow = {
   subjectLabel: string
   /** Disciplinas cobertas pela linha da regente (vazio nas demais). */
   regenteSubjects: string[]
+  regenteSubjectIds: string[]
   origin: DiaryRowOrigin
   extraRowId: string | null
   extraNotes: string | null
@@ -96,6 +98,7 @@ export function buildDiaryRows(input: {
       subjectId,
       subjectLabel: subjectId ? (subjectById.get(subjectId)?.name ?? 'Disciplina removida') : 'Regente',
       regenteSubjects: [],
+      regenteSubjectIds: [],
       origin,
       extraRowId: null,
       extraNotes: null,
@@ -118,6 +121,7 @@ export function buildDiaryRows(input: {
           rows.set(key, row)
         }
         if (isRegente) {
+          if (!row.regenteSubjectIds.includes(cs.subjectId)) row.regenteSubjectIds.push(cs.subjectId)
           const name = subjectById.get(cs.subjectId)?.name
           if (name && !row.regenteSubjects.includes(name)) row.regenteSubjects.push(name)
         }
@@ -262,4 +266,78 @@ export function pendingMessage(pending: TeacherPending, month: number, year: num
     ...lines,
     'Por favor, regularize assim que possível. Obrigado!',
   ].join('\n')
+}
+
+// ─── leitura do Escolar (robô) ────────────────────────────────────────────────
+
+export type ReadingInput = {
+  classGroupId: string
+  subjectId: string
+  /** Professor do Escolar já vinculado a um professor daqui, se houver. */
+  teacherId: string | null
+  month: number
+  lessons: ReadingLesson[]
+  planned: number | null
+  given: number | null
+  readAt: string
+  /** Nome da disciplina no Escolar (aparece no detalhe). */
+  emDisciplina: string
+}
+
+export type RowReading = {
+  summary: ReadingSummary
+  /** Leitura mais recente entre as partes. */
+  readAt: string
+  /** Uma parte por disciplina do Escolar (a linha da regente junta várias). */
+  parts: { subjectLabel: string; lessons: ReadingLesson[]; summary: ReadingSummary; planned: number | null; given: number | null }[]
+}
+
+/**
+ * Liga cada leitura à linha da grade: a da disciplina na turma, ou a da regente
+ * se a disciplina é dela. Com mais de uma linha possível (professor trocado no
+ * ano), vale a do professor vinculado; senão a que está nas Atribuições.
+ */
+export function attachReadings(
+  rowsByClass: Map<string, DiaryRow[]>,
+  readings: ReadingInput[],
+  subjectNameById: Map<string, string>,
+): { cells: Map<string, RowReading>; unattached: number } {
+  const cells = new Map<string, RowReading>()
+  let unattached = 0
+
+  for (const r of readings) {
+    const rows = rowsByClass.get(r.classGroupId) ?? []
+    const candidates = rows.filter(
+      (row) => row.subjectId === r.subjectId || (row.subjectId === null && row.regenteSubjectIds.includes(r.subjectId)),
+    )
+    const row =
+      (r.teacherId ? candidates.find((c) => c.teacherId === r.teacherId) : undefined) ??
+      candidates.find((c) => c.origin !== 'history') ??
+      candidates[0]
+    if (!row) {
+      unattached++
+      continue
+    }
+
+    const summary = summarizeLessons(r.lessons, saoPauloDate(r.readAt))
+    const key = cellKey(row.key, r.month)
+    const part = {
+      subjectLabel: subjectNameById.get(r.subjectId) ?? r.emDisciplina,
+      lessons: [...r.lessons].sort((a, b) => a.date.localeCompare(b.date)),
+      summary,
+      planned: r.planned,
+      given: r.given,
+    }
+    const existing = cells.get(key)
+    if (existing) {
+      existing.summary = addSummaries(existing.summary, summary)
+      if (r.readAt > existing.readAt) existing.readAt = r.readAt
+      existing.parts.push(part)
+      existing.parts.sort((a, b) => collator.compare(a.subjectLabel, b.subjectLabel))
+    } else {
+      cells.set(key, { summary, readAt: r.readAt, parts: [part] })
+    }
+  }
+
+  return { cells, unattached }
 }
