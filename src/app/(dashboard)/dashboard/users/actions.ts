@@ -3,12 +3,10 @@
 import { revalidatePath } from 'next/cache'
 import { z } from 'zod'
 
-import { createClient } from '@/lib/supabase/server'
-import { adminSupabase } from '@/lib/supabase/admin'
+import { db, run } from '@/lib/db'
+import { friendlyDbError, type ActionResult } from '@/lib/actions'
 import { getAdminProfile, type SessionProfile } from '@/lib/auth/session'
 import { isAllowedEmail, ALLOWED_EMAIL_DOMAIN } from '@/lib/auth/allowed-domain'
-
-type ActionResult = { success: boolean; error?: string }
 
 const roleSchema = z.enum(['ADMIN', 'COORDINATOR', 'VIEWER'])
 
@@ -39,28 +37,26 @@ function firstIssue(error: z.ZodError): string {
 
 /** Há outro administrador ativo além de `exceptId`? Evita trancar o sistema. */
 async function hasOtherActiveAdmin(admin: SessionProfile, exceptId: string) {
-  const supabase = await createClient()
-  const { count } = await supabase
-    .from('profiles')
-    .select('id', { count: 'exact', head: true })
-    .eq('tenant_id', admin.tenant_id)
-    .eq('role', 'ADMIN')
-    .eq('active', true)
-    .neq('id', exceptId)
-  return (count ?? 0) > 0
+  const row = await db.one(
+    "SELECT 1 FROM profiles WHERE tenant_id = $1 AND role = 'ADMIN' AND active AND id <> $2 LIMIT 1",
+    [admin.tenant_id, exceptId],
+  )
+  return row !== null
 }
 
-async function findAuthUserIdByEmail(email: string): Promise<string | null> {
-  for (let page = 1; page <= 20; page++) {
-    const { data, error } = await adminSupabase.auth.admin.listUsers({ page, perPage: 200 })
-    if (error) return null
-    const found = data.users.find((u) => u.email?.toLowerCase() === email)
-    if (found) return found.id
-    if (data.users.length < 200) return null
-  }
-  return null
+type Target = { id: string; role: string; active: boolean }
+
+function findTarget(admin: SessionProfile, id: string) {
+  return db.one<Target>('SELECT id, role, active FROM profiles WHERE id = $1 AND tenant_id = $2', [
+    id,
+    admin.tenant_id,
+  ])
 }
 
+/**
+ * Cadastra o perfil. Não há senha: a pessoa entra com a conta Google da escola
+ * e o login a encontra pelo e-mail.
+ */
 export async function createUser(input: unknown): Promise<ActionResult> {
   const admin = await getAdminProfile()
   if (!admin) return NOT_ADMIN
@@ -69,55 +65,14 @@ export async function createUser(input: unknown): Promise<ActionResult> {
   if (!parsed.success) return { success: false, error: firstIssue(parsed.error) }
   const { name, email, role } = parsed.data
 
-  const supabase = await createClient()
-
-  const { data: existing } = await supabase
-    .from('profiles')
-    .select('id')
-    .eq('tenant_id', admin.tenant_id)
-    .eq('email', email)
-    .maybeSingle()
-  if (existing) return { success: false, error: 'Já existe um usuário com este e-mail.' }
-
-  // A conta de login (auth.users) nasce sem senha: a pessoa entra com o Google
-  // da escola, ou define uma senha em "Esqueci minha senha".
-  let authUserId: string | null = null
-  let createdAuthUser = false
-
-  const { data: created, error: createError } = await adminSupabase.auth.admin.createUser({
-    email,
-    email_confirm: true,
-    user_metadata: { name },
-  })
-
-  if (created?.user) {
-    authUserId = created.user.id
-    createdAuthUser = true
-  } else {
-    // A conta pode já existir (ex.: tentou entrar com o Google antes de ter perfil).
-    authUserId = await findAuthUserIdByEmail(email)
-    if (!authUserId) {
-      return {
-        success: false,
-        error: `Não foi possível criar a conta: ${createError?.message ?? 'erro desconhecido'}`,
-      }
-    }
-  }
-
-  // Inserido com o cliente do admin logado: a RLS confere o papel e o histórico
-  // registra quem criou.
-  const { error: insertError } = await supabase.from('profiles').insert({
-    id: authUserId,
-    tenant_id: admin.tenant_id,
-    name,
-    email,
-    role,
-    active: true,
-  })
-
-  if (insertError) {
-    if (createdAuthUser) await adminSupabase.auth.admin.deleteUser(authUserId)
-    return { success: false, error: insertError.message }
+  try {
+    await run(
+      admin.id,
+      'INSERT INTO profiles (tenant_id, name, email, role, active) VALUES ($1, $2, $3, $4, true)',
+      [admin.tenant_id, name, email, role],
+    )
+  } catch (e) {
+    return { success: false, error: friendlyDbError(e, { unique: 'Já existe um usuário com este e-mail.' }) }
   }
 
   revalidatePath('/dashboard/users')
@@ -132,13 +87,7 @@ export async function updateUser(id: string, input: unknown): Promise<ActionResu
   if (!parsed.success) return { success: false, error: firstIssue(parsed.error) }
   const { name, role } = parsed.data
 
-  const supabase = await createClient()
-  const { data: target } = await supabase
-    .from('profiles')
-    .select('id, role, active')
-    .eq('id', id)
-    .eq('tenant_id', admin.tenant_id)
-    .maybeSingle()
+  const target = await findTarget(admin, id)
   if (!target) return { success: false, error: 'Usuário não encontrado.' }
 
   if (target.role === 'ADMIN' && role !== 'ADMIN') {
@@ -150,13 +99,16 @@ export async function updateUser(id: string, input: unknown): Promise<ActionResu
     }
   }
 
-  const { error } = await supabase
-    .from('profiles')
-    .update({ name, role })
-    .eq('id', id)
-    .eq('tenant_id', admin.tenant_id)
-
-  if (error) return { success: false, error: error.message }
+  try {
+    await run(admin.id, 'UPDATE profiles SET name = $1, role = $2 WHERE id = $3 AND tenant_id = $4', [
+      name,
+      role,
+      id,
+      admin.tenant_id,
+    ])
+  } catch (e) {
+    return { success: false, error: friendlyDbError(e) }
+  }
 
   revalidatePath('/dashboard/users')
   revalidatePath('/dashboard', 'layout')
@@ -171,26 +123,21 @@ export async function toggleUserActive(id: string): Promise<ActionResult> {
     return { success: false, error: 'Você não pode desativar o seu próprio acesso.' }
   }
 
-  const supabase = await createClient()
-  const { data: target } = await supabase
-    .from('profiles')
-    .select('id, role, active')
-    .eq('id', id)
-    .eq('tenant_id', admin.tenant_id)
-    .maybeSingle()
+  const target = await findTarget(admin, id)
   if (!target) return { success: false, error: 'Usuário não encontrado.' }
 
   if (target.active && target.role === 'ADMIN' && !(await hasOtherActiveAdmin(admin, id))) {
     return { success: false, error: 'O sistema precisa de pelo menos um administrador ativo.' }
   }
 
-  const { error } = await supabase
-    .from('profiles')
-    .update({ active: !target.active })
-    .eq('id', id)
-    .eq('tenant_id', admin.tenant_id)
-
-  if (error) return { success: false, error: error.message }
+  try {
+    await run(admin.id, 'UPDATE profiles SET active = NOT active WHERE id = $1 AND tenant_id = $2', [
+      id,
+      admin.tenant_id,
+    ])
+  } catch (e) {
+    return { success: false, error: friendlyDbError(e) }
+  }
 
   revalidatePath('/dashboard/users')
   return { success: true }

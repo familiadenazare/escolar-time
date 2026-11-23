@@ -2,7 +2,7 @@
 
 import { useSyncExternalStore } from 'react'
 import Link from 'next/link'
-import { usePathname, useRouter } from 'next/navigation'
+import { usePathname } from 'next/navigation'
 import {
   LayoutDashboard,
   Building2,
@@ -21,8 +21,8 @@ import {
   PanelLeftOpen,
   UserCog,
   History,
+  NotebookPen,
 } from 'lucide-react'
-import { createClient } from '@/lib/supabase/client'
 
 const NAV_ITEMS = [
   { label: 'Dashboard',      href: '/dashboard',             icon: LayoutDashboard },
@@ -36,6 +36,7 @@ const NAV_ITEMS = [
   { label: 'Regras Globais', href: '/dashboard/constraints/rules', icon: Settings2 },
   { label: 'Gerar Horário',  href: '/dashboard/generate',    icon: Wand2, editorOnly: true },
   { label: 'Horários',       href: '/dashboard/schedules',   icon: CalendarDays },
+  { label: 'Diários',        href: '/dashboard/diaries',     icon: NotebookPen },
 ]
 
 // Só para administradores.
@@ -71,8 +72,6 @@ interface SidebarProps {
 
 export function Sidebar({ userName, userEmail, isAdmin, canEdit }: SidebarProps) {
   const pathname = usePathname()
-  const router = useRouter()
-  const supabase = createClient()
   const collapsed = useSyncExternalStore(
     subscribeCollapsed,
     getCollapsedSnapshot,
@@ -86,9 +85,8 @@ export function Sidebar({ userName, userEmail, isAdmin, canEdit }: SidebarProps)
     collapsedListeners.forEach((l) => l())
   }
 
-  async function handleSignOut() {
-    await supabase.auth.signOut()
-    router.push('/login')
+  function handleSignOut() {
+    window.location.href = '/auth/signout'
   }
 
   return (

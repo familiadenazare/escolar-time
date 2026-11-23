@@ -1,5 +1,5 @@
 import { notFound, redirect } from 'next/navigation'
-import { createClient } from '@/lib/supabase/server'
+import { db } from '@/lib/db'
 import { getAdminProfile } from '@/lib/auth/session'
 import { UserForm } from '@/components/users/user-form'
 import type { RoleKey } from '@/lib/auth/roles'
@@ -13,14 +13,10 @@ export default async function EditUserPage({
   if (!admin) redirect('/dashboard')
 
   const { id } = await params
-  const supabase = await createClient()
-
-  const { data: user } = await supabase
-    .from('profiles')
-    .select('id, name, email, role')
-    .eq('id', id)
-    .eq('tenant_id', admin.tenant_id)
-    .maybeSingle()
+  const user = await db.one<{ id: string; name: string; email: string; role: string }>(
+    'SELECT id, name, email, role FROM profiles WHERE id = $1 AND tenant_id = $2',
+    [id, admin.tenant_id],
+  )
 
   if (!user) notFound()
 

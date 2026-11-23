@@ -1,81 +1,84 @@
 import { NextResponse, type NextRequest } from 'next/server'
 
-import { createClient } from '@/lib/supabase/server'
-import { adminSupabase, adminSupabaseAs } from '@/lib/supabase/admin'
-import { isAllowedEmail } from '@/lib/auth/allowed-domain'
-import { DEFAULT_ROLE } from '@/lib/auth/roles'
+import { resolveLogin } from '@/lib/auth/login'
+import { publicOrigin } from '@/lib/auth/origin'
+import {
+  createSessionToken,
+  OAUTH_STATE_COOKIE,
+  SESSION_COOKIE,
+  sessionCookieOptions,
+} from '@/lib/auth/session-token'
 
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
+type IdTokenClaims = {
+  iss?: string
+  aud?: string
+  email?: string
+  email_verified?: boolean
+  name?: string
+  exp?: number
+}
 
-// Destino do OAuth (Google). Troca o `code` pela sessão e só a mantém se a
-// conta for do domínio da escola. Quem entra pela primeira vez ganha um perfil
-// de Visualizador (só consulta); o administrador promove quem precisar editar.
-// Perfil desativado continua sem acesso.
+function decodeIdToken(idToken: string): IdTokenClaims | null {
+  try {
+    const payload = idToken.split('.')[1]
+    return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as IdTokenClaims
+  } catch {
+    return null
+  }
+}
+
+// Volta do Google: troca o `code` pelo id_token e abre a sessão do app.
+// O id_token vem direto do endpoint de token do Google, por TLS e autenticado
+// com o client secret — por isso basta conferir emissor, público e validade
+// (OpenID Connect Core, 3.1.3.7).
 export async function GET(request: NextRequest) {
-  const { searchParams } = request.nextUrl
-  // Atrás de proxy reverso (Coolify) `nextUrl.origin` é o endereço interno
-  // (localhost:3000). O host público vem nos cabeçalhos encaminhados.
-  const host =
-    request.headers.get('x-forwarded-host') ?? request.headers.get('host')
-  const proto = request.headers.get('x-forwarded-proto') ??
-    request.nextUrl.protocol.replace(':', '')
-  const origin = host ? `${proto}://${host}` : request.nextUrl.origin
-  const code = searchParams.get('code')
-
-  const fail = async (
-    reason: 'oauth' | 'domain' | 'no_profile' | 'inactive',
-    signOut = false
-  ) => {
-    if (signOut) {
-      const supabase = await createClient()
-      await supabase.auth.signOut()
-    }
-    return NextResponse.redirect(`${origin}/login?error=${reason}`)
+  const origin = publicOrigin(request)
+  const fail = (reason: string) => {
+    const res = NextResponse.redirect(`${origin}/login?error=${reason}`)
+    res.cookies.delete({ name: OAUTH_STATE_COOKIE, path: '/auth' })
+    return res
   }
 
-  if (!code) return fail('oauth')
+  const code = request.nextUrl.searchParams.get('code')
+  const state = request.nextUrl.searchParams.get('state')
+  const expected = request.cookies.get(OAUTH_STATE_COOKIE)?.value
+  if (!code || !state || !expected || state !== expected) return fail('oauth')
 
-  const supabase = await createClient()
-  const { error } = await supabase.auth.exchangeCodeForSession(code)
-  if (error) return fail('oauth')
+  const clientId = process.env.GOOGLE_CLIENT_ID
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET
+  if (!clientId || !clientSecret) return fail('oauth')
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-
-  // O parâmetro `hd` do Google é só uma dica de UI e pode ser adulterado:
-  // a restrição de domínio de fato é validada aqui, no servidor.
-  if (!user || !isAllowedEmail(user.email)) return fail('domain', true)
-
-  // Lido com a service-role: a RLS esconde o perfil de usuário desativado, e
-  // aqui precisamos distinguir "sem cadastro" de "desativado".
-  const { data: profile } = await adminSupabase
-    .from('profiles')
-    .select('id, active')
-    .eq('id', user.id)
-    .maybeSingle()
-
-  if (profile && !profile.active) return fail('inactive', true)
-
-  if (!profile) {
-    const meta = user.user_metadata ?? {}
-    const email = user.email!.trim().toLowerCase()
-    const name =
-      [meta.full_name, meta.name].find(
-        (v): v is string => typeof v === 'string' && v.trim() !== ''
-      )?.trim() ?? email.split('@')[0]
-
-    // Service-role: a RLS só deixa ADMIN criar perfis. O x-actor-id faz o
-    // histórico registrar a própria pessoa como autora do cadastro.
-    const { error: insertError } = await adminSupabaseAs(user.id)
-      .from('profiles')
-      .upsert(
-        { id: user.id, tenant_id: TENANT_ID, name, email, role: DEFAULT_ROLE, active: true },
-        { onConflict: 'id', ignoreDuplicates: true }
-      )
-
-    if (insertError) return fail('no_profile', true)
+  let claims: IdTokenClaims | null = null
+  try {
+    const resp = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: `${origin}/auth/callback`,
+        grant_type: 'authorization_code',
+      }),
+    })
+    if (!resp.ok) return fail('oauth')
+    const data = (await resp.json()) as { id_token?: string }
+    claims = data.id_token ? decodeIdToken(data.id_token) : null
+  } catch {
+    return fail('oauth')
   }
 
-  return NextResponse.redirect(`${origin}/dashboard`)
+  const validIssuer = claims?.iss === 'https://accounts.google.com' || claims?.iss === 'accounts.google.com'
+  const notExpired = (claims?.exp ?? 0) * 1000 > Date.now()
+  if (!claims || !validIssuer || claims.aud !== clientId || !notExpired || !claims.email || !claims.email_verified) {
+    return fail('oauth')
+  }
+
+  const outcome = await resolveLogin(claims.email, claims.name ?? null)
+  if (!outcome.ok) return fail(outcome.reason)
+
+  const res = NextResponse.redirect(`${origin}/dashboard`)
+  res.cookies.delete({ name: OAUTH_STATE_COOKIE, path: '/auth' })
+  res.cookies.set(SESSION_COOKIE, await createSessionToken(outcome.profileId), sessionCookieOptions)
+  return res
 }

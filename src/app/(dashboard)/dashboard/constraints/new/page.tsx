@@ -1,39 +1,22 @@
 import { redirect } from 'next/navigation'
 import { getEditorProfile } from '@/lib/auth/session'
-import { createClient } from '@/lib/supabase/server'
+import { listActiveSubjects, listActiveTeachers, listActiveUnits } from '@/lib/queries'
 import { ConstraintWizard } from '@/components/constraints/constraint-wizard'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
 
 interface NewConstraintPageProps {
   searchParams: Promise<{ teacherId?: string }>
 }
 
 export default async function NewConstraintPage({ searchParams }: NewConstraintPageProps) {
-  if (!(await getEditorProfile())) redirect('/dashboard/constraints')
+  const editor = await getEditorProfile()
+  if (!editor) redirect('/dashboard/constraints')
 
   const { teacherId } = await searchParams
-  const supabase = await createClient()
 
-  const [{ data: teachers }, { data: units }, { data: subjects }] = await Promise.all([
-    supabase
-      .from('teachers')
-      .select('id, name')
-      .eq('tenant_id', TENANT_ID)
-      .eq('active', true)
-      .order('name'),
-    supabase
-      .from('school_units')
-      .select('id, name')
-      .eq('tenant_id', TENANT_ID)
-      .eq('active', true)
-      .order('name'),
-    supabase
-      .from('subjects')
-      .select('id, name')
-      .eq('tenant_id', TENANT_ID)
-      .eq('active', true)
-      .order('name'),
+  const [teachers, units, subjects] = await Promise.all([
+    listActiveTeachers(editor.tenant_id),
+    listActiveUnits(editor.tenant_id),
+    listActiveSubjects(editor.tenant_id),
   ])
 
   return (
@@ -45,9 +28,9 @@ export default async function NewConstraintPage({ searchParams }: NewConstraintP
         </p>
       </div>
       <ConstraintWizard
-        teachers={teachers ?? []}
-        units={units ?? []}
-        subjects={subjects ?? []}
+        teachers={teachers}
+        units={units}
+        subjects={subjects.map(({ id, name }) => ({ id, name }))}
         initialTeacherId={teacherId}
       />
     </div>

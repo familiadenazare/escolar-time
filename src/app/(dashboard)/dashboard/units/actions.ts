@@ -1,10 +1,8 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
-import { createClient } from '@/lib/supabase/server'
-import { denyIfReadOnly } from '@/lib/auth/session'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
+import { run } from '@/lib/db'
+import { editorAction, type ActionResult } from '@/lib/actions'
 
 type FormData = {
   name: string
@@ -12,72 +10,38 @@ type FormData = {
   address?: string
 }
 
-type ActionResult = { success: boolean; error?: string }
+const UNIQUE = { unique: 'Já existe uma unidade com esse código.' }
 
 export async function createUnit(data: FormData): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { error } = await supabase.from('school_units').insert({
-    tenant_id: TENANT_ID,
-    name: data.name,
-    code: data.code.toUpperCase(),
-    address: data.address ?? null,
-  })
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/units')
-  return { success: true }
+  return editorAction(async (p) => {
+    await run(
+      p.id,
+      'INSERT INTO school_units (tenant_id, name, code, address) VALUES ($1, $2, $3, $4)',
+      [p.tenant_id, data.name, data.code.toUpperCase(), data.address ?? null],
+    )
+    revalidatePath('/dashboard/units')
+  }, UNIQUE)
 }
 
 export async function updateUnit(id: string, data: FormData): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { error } = await supabase
-    .from('school_units')
-    .update({
-      name: data.name,
-      code: data.code.toUpperCase(),
-      address: data.address ?? null,
-    })
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/units')
-  return { success: true }
+  return editorAction(async (p) => {
+    await run(
+      p.id,
+      'UPDATE school_units SET name = $1, code = $2, address = $3 WHERE id = $4 AND tenant_id = $5',
+      [data.name, data.code.toUpperCase(), data.address ?? null, id, p.tenant_id],
+    )
+    revalidatePath('/dashboard/units')
+  }, UNIQUE)
 }
 
 export async function toggleUnitStatus(id: string): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { data: unit, error: fetchError } = await supabase
-    .from('school_units')
-    .select('active')
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-    .single()
-
-  if (fetchError || !unit) return { success: false, error: 'Unidade não encontrada.' }
-
-  const { error } = await supabase
-    .from('school_units')
-    .update({ active: !unit.active })
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/units')
-  return { success: true }
+  return editorAction(async (p) => {
+    const rows = await run(
+      p.id,
+      'UPDATE school_units SET active = NOT active WHERE id = $1 AND tenant_id = $2 RETURNING id',
+      [id, p.tenant_id],
+    )
+    if (rows.length === 0) return { success: false, error: 'Unidade não encontrada.' }
+    revalidatePath('/dashboard/units')
+  })
 }

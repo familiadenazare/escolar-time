@@ -1,9 +1,7 @@
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { requireEditor } from '@/lib/auth/api'
-import { adminSupabase } from '@/lib/supabase/admin'
-
-export const TENANT_ID = '00000000-0000-0000-0000-000000000001'
+import { db, type Queryable } from '@/lib/db'
 
 export const lessonsSchema = z
   .array(
@@ -30,17 +28,16 @@ type Fail = { ok: false; response: NextResponse }
 /** Usuário que pode editar (ADMIN/COORDINATOR) + horário editável (concluído e não apagado) do tenant. */
 export async function loadEditableSchedule(
   id: string
-): Promise<Ok<{ userId: string; schedule: EditableSchedule }> | Fail> {
+): Promise<Ok<{ userId: string; tenantId: string; schedule: EditableSchedule }> | Fail> {
   const auth = await requireEditor()
   if (!auth.ok) return auth
   const { user } = auth
 
-  const { data: schedule } = await adminSupabase
-    .from('generated_schedules')
-    .select('id, name, status, is_baseline, baseline_weight, config_snapshot, deleted_at')
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-    .single()
+  const schedule = await db.one<EditableSchedule & { status: string | null; deleted_at: string | null }>(
+    `SELECT id, name, status, is_baseline, baseline_weight, config_snapshot, deleted_at
+       FROM generated_schedules WHERE id = $1 AND tenant_id = $2`,
+    [id, user.tenant_id],
+  )
 
   if (!schedule || schedule.deleted_at) {
     return { ok: false, response: NextResponse.json({ error: 'Horário não encontrado.' }, { status: 404 }) }
@@ -52,7 +49,7 @@ export async function loadEditableSchedule(
     }
   }
 
-  return { ok: true, userId: user.id, schedule: schedule as EditableSchedule }
+  return { ok: true, userId: user.id, tenantId: user.tenant_id, schedule }
 }
 
 export async function parseJson(request: Request): Promise<unknown | undefined> {
@@ -79,16 +76,28 @@ export async function scheduleVigencia(
   const snap = schedule.config_snapshot
   if (snap && 'vigencia' in snap) return (snap.vigencia as string | null) ?? null
 
-  const { data: entry } = await adminSupabase
-    .from('schedule_entries')
-    .select('time_slots(time_grids(vigencia))')
-    .eq('generated_schedule_id', schedule.id)
-    .limit(1)
-    .maybeSingle()
-
-  const slot = entry?.time_slots as unknown as
-    | { time_grids: { vigencia: string | null } | { vigencia: string | null }[] | null }
-    | null
-  const grid = Array.isArray(slot?.time_grids) ? slot?.time_grids[0] : slot?.time_grids
+  const grid = await db.one<{ vigencia: string | null }>(
+    `SELECT g.vigencia
+       FROM schedule_entries e
+       JOIN time_slots ts ON ts.id = e.time_slot_id
+       JOIN time_grids g ON g.id = ts.time_grid_id
+      WHERE e.generated_schedule_id = $1
+      LIMIT 1`,
+    [schedule.id],
+  )
   return grid ? (grid.vigencia ?? null) : undefined
+}
+
+/** Grava as aulas de um horário (milhares de linhas: arrays em vez de um VALUES gigante). */
+export async function insertScheduleEntries(
+  q: Queryable,
+  scheduleId: string,
+  entries: { assignmentId: string; day: number; slotId: string }[],
+) {
+  if (entries.length === 0) return
+  await q.query(
+    `INSERT INTO schedule_entries (generated_schedule_id, teaching_assignment_id, day_of_week, time_slot_id, locked)
+     SELECT $1, a, d, s, false FROM unnest($2::uuid[], $3::int[], $4::uuid[]) AS t(a, d, s)`,
+    [scheduleId, entries.map((e) => e.assignmentId), entries.map((e) => e.day), entries.map((e) => e.slotId)],
+  )
 }

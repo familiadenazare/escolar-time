@@ -1,37 +1,23 @@
 import { Building2, GraduationCap, Users, CalendarDays } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
-import { createClient } from '@/lib/supabase/server'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
+import { db } from '@/lib/db'
+import { requireProfile } from '@/lib/auth/session'
 
 async function getSummaryCounts() {
-  const supabase = await createClient()
-
-  const [units, teachers, classGroups, schedules] = await Promise.all([
-    supabase
-      .from('school_units')
-      .select('*', { count: 'exact', head: true })
-      .eq('tenant_id', TENANT_ID),
-    supabase
-      .from('teachers')
-      .select('*', { count: 'exact', head: true })
-      .eq('tenant_id', TENANT_ID),
-    supabase
-      .from('class_groups')
-      .select('*', { count: 'exact', head: true })
-      .eq('tenant_id', TENANT_ID),
-    supabase
-      .from('generated_schedules')
-      .select('*', { count: 'exact', head: true })
-      .eq('tenant_id', TENANT_ID)
-      .is('deleted_at', null),
-  ])
-
+  const { tenant_id } = await requireProfile()
+  const row = await db.one<{ units: number; teachers: number; class_groups: number; schedules: number }>(
+    `SELECT
+       (SELECT count(*) FROM school_units WHERE tenant_id = $1)::int AS units,
+       (SELECT count(*) FROM teachers WHERE tenant_id = $1)::int AS teachers,
+       (SELECT count(*) FROM class_groups WHERE tenant_id = $1)::int AS class_groups,
+       (SELECT count(*) FROM generated_schedules WHERE tenant_id = $1 AND deleted_at IS NULL)::int AS schedules`,
+    [tenant_id],
+  )
   return {
-    units: units.count ?? 0,
-    teachers: teachers.count ?? 0,
-    classGroups: classGroups.count ?? 0,
-    schedules: schedules.count ?? 0,
+    units: row?.units ?? 0,
+    teachers: row?.teachers ?? 0,
+    classGroups: row?.class_groups ?? 0,
+    schedules: row?.schedules ?? 0,
   }
 }
 

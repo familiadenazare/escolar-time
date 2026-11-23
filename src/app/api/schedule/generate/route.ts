@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { adminSupabaseAs } from '@/lib/supabase/admin'
 import { requireEditor } from '@/lib/auth/api'
+import { run, tx } from '@/lib/db'
+import { insertScheduleEntries } from '@/lib/schedule-edit'
 import { generateSchedule } from '@/engine/index'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
 
 // O solver tem timeout interno de 25s; damos folga para carga + otimização.
 export const maxDuration = 60
@@ -12,8 +11,7 @@ export async function POST(request: NextRequest) {
   const auth = await requireEditor()
   if (!auth.ok) return auth.response
   const { user } = auth
-
-  const adminSupabase = adminSupabaseAs(user.id)
+  const tenantId = user.tenant_id
 
   let body: {
     name?: string
@@ -36,26 +34,30 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'O nome do horário é obrigatório.' }, { status: 400 })
   }
 
-  const { data: scheduleRecord, error: insertError } = await adminSupabase
-    .from('generated_schedules')
-    .insert({
-      tenant_id: TENANT_ID,
-      name: name.trim(),
-      status: 'GENERATING',
-      created_by: user.id,
-      baseline_weight: baselineWeight ?? 0.7,
-    })
-    .select('id')
-    .single()
-
-  if (insertError || !scheduleRecord) {
+  let scheduleId: string
+  try {
+    const [created] = await run<{ id: string }>(
+      user.id,
+      `INSERT INTO generated_schedules (tenant_id, name, status, created_by, baseline_weight)
+       VALUES ($1, $2, 'GENERATING', $3, $4) RETURNING id`,
+      [tenantId, name.trim(), user.id, baselineWeight ?? 0.7],
+    )
+    scheduleId = created.id
+  } catch {
     return NextResponse.json({ error: 'Erro ao criar registro de horário.' }, { status: 500 })
   }
 
-  const scheduleId = scheduleRecord.id
+  const markFailed = (violations: unknown[], snapshot?: Record<string, unknown>) =>
+    run(
+      user.id,
+      `UPDATE generated_schedules
+          SET status = 'FAILED', violations = $1::jsonb, config_snapshot = coalesce($2::jsonb, config_snapshot)
+        WHERE id = $3`,
+      [JSON.stringify(violations), snapshot ? JSON.stringify(snapshot) : null, scheduleId],
+    )
 
   try {
-    const result = await generateSchedule(TENANT_ID, {
+    const result = await generateSchedule(tenantId, {
       name: name.trim(),
       baselineScheduleId,
       baselineWeight: baselineWeight ?? 0.7,
@@ -63,18 +65,11 @@ export async function POST(request: NextRequest) {
     })
 
     if (result.status === 'INFEASIBLE') {
-      await adminSupabase
-        .from('generated_schedules')
-        .update({
-          status: 'FAILED',
-          violations: result.validationErrors ?? [],
-          config_snapshot: {
-            warnings: result.warnings ?? [],
-            stats: result.stats,
-            ...(vigencia !== undefined ? { vigencia } : {}),
-          },
-        })
-        .eq('id', scheduleId)
+      await markFailed(result.validationErrors ?? [], {
+        warnings: result.warnings ?? [],
+        stats: result.stats,
+        ...(vigencia !== undefined ? { vigencia } : {}),
+      })
 
       return NextResponse.json({
         scheduleId,
@@ -84,55 +79,35 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    // SUCCESS ou PARTIAL — grava as aulas alocadas
-    const entries = (result.solution?.entries ?? []).map((entry) => ({
-      generated_schedule_id: scheduleId,
-      teaching_assignment_id: entry.assignmentId,
-      day_of_week: entry.day,
-      time_slot_id: entry.slotId,
-      locked: false,
-    }))
-
-    if (entries.length > 0) {
-      const { error: entriesError } = await adminSupabase
-        .from('schedule_entries')
-        .insert(entries)
-
-      if (entriesError) {
-        await adminSupabase
-          .from('generated_schedules')
-          .update({
-            status: 'FAILED',
-            violations: [`Erro ao gravar as aulas do horário: ${entriesError.message}`],
-          })
-          .eq('id', scheduleId)
-
-        return NextResponse.json({
-          scheduleId,
-          status: 'FAILED',
-          errors: [`Erro ao gravar as aulas do horário: ${entriesError.message}`],
-        })
-      }
-    }
-
+    // SUCCESS ou PARTIAL — grava as aulas alocadas e conclui, tudo de uma vez.
     const partial = result.status === 'PARTIAL'
-
-    await adminSupabase
-      .from('generated_schedules')
-      .update({
-        status: 'COMPLETED',
-        score: result.score,
-        violations: result.violations,
-        config_snapshot: {
-          partial,
-          stats: result.stats,
-          warnings: result.warnings ?? [],
-          baselineSimilarity: result.baselineSimilarity,
-          baselineScheduleId: baselineScheduleId ?? null,
-          ...(vigencia !== undefined ? { vigencia } : {}),
-        },
+    try {
+      await tx(user.id, async (q) => {
+        await insertScheduleEntries(q, scheduleId, result.solution?.entries ?? [])
+        await q.query(
+          `UPDATE generated_schedules
+              SET status = 'COMPLETED', score = $1, violations = $2::jsonb, config_snapshot = $3::jsonb
+            WHERE id = $4`,
+          [
+            result.score,
+            JSON.stringify(result.violations ?? null),
+            JSON.stringify({
+              partial,
+              stats: result.stats,
+              warnings: result.warnings ?? [],
+              baselineSimilarity: result.baselineSimilarity,
+              baselineScheduleId: baselineScheduleId ?? null,
+              ...(vigencia !== undefined ? { vigencia } : {}),
+            }),
+            scheduleId,
+          ],
+        )
       })
-      .eq('id', scheduleId)
+    } catch (e) {
+      const message = `Erro ao gravar as aulas do horário: ${e instanceof Error ? e.message : String(e)}`
+      await markFailed([message])
+      return NextResponse.json({ scheduleId, status: 'FAILED', errors: [message] })
+    }
 
     return NextResponse.json({
       scheduleId,
@@ -144,11 +119,7 @@ export async function POST(request: NextRequest) {
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Erro desconhecido.'
-
-    await adminSupabase
-      .from('generated_schedules')
-      .update({ status: 'FAILED', violations: [message] })
-      .eq('id', scheduleId)
+    await markFailed([message]).catch(() => {})
 
     console.error('generateSchedule error:', err)
     return NextResponse.json(

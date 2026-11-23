@@ -10,8 +10,7 @@ export default async function NewUserPage() {
       <div>
         <h1 className="text-2xl font-bold text-navy">Novo Usuário</h1>
         <p className="text-slate text-sm mt-1">
-          A pessoa entra com a conta Google da escola. Se preferir senha, ela pode criar uma em
-          &ldquo;Esqueci minha senha&rdquo; na tela de login.
+          A pessoa entra com a conta Google da escola (o mesmo e-mail cadastrado aqui).
         </p>
       </div>
       <UserForm />

@@ -1,10 +1,9 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
-import { createClient } from '@/lib/supabase/server'
-import { denyIfReadOnly } from '@/lib/auth/session'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
+import { bulkValues, db, isForeignKeyViolation, tx, type Queryable } from '@/lib/db'
+import { editorAction, type ActionResult } from '@/lib/actions'
+import type { SessionProfile } from '@/lib/auth/session'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -32,11 +31,23 @@ type SlotData = {
 
 type SlotsByDay = Record<number, SlotData[]>
 
-type ActionResult = { success: boolean; error?: string }
+type SlotRow = {
+  day_of_week: number
+  slot_order: number
+  duration_minutes: number | null
+  start_time: string | null
+  end_time: string | null
+  type: SlotKind
+  label: string | null
+}
+
+/** Erro de negócio que vira { success: false, error } sem ser erro do banco. */
+class UserError extends Error {}
+
+const SLOT_IN_USE =
+  'Não é possível remover horários que já são usados em um horário gerado. Exclua esse horário gerado antes ou mantenha a quantidade de slots.'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-type Supabase = Awaited<ReturnType<typeof createClient>>
 
 function normalizeVigencia(v: string | null | undefined): string | null {
   const t = (v ?? '').trim()
@@ -48,58 +59,42 @@ function normalizeVigencia(v: string | null | undefined): string | null {
  * grade de cada turma. Retorna o nome da grade conflitante, se houver.
  */
 async function findConflictingGrid(
-  supabase: Supabase,
+  q: Queryable,
+  tenantId: string,
   classGroupId: string,
   vigencia: string | null,
-  excludeId?: string
+  excludeId?: string,
 ): Promise<string | null> {
-  let q = supabase
-    .from('time_grids')
-    .select('id, name')
-    .eq('tenant_id', TENANT_ID)
-    .eq('class_group_id', classGroupId)
-  q = vigencia === null ? q.is('vigencia', null) : q.eq('vigencia', vigencia)
-  if (excludeId) q = q.neq('id', excludeId)
-  const { data } = await q.limit(1)
-  return data?.[0]?.name ?? null
+  const row = await q.one<{ name: string }>(
+    `SELECT name FROM time_grids
+      WHERE tenant_id = $1 AND class_group_id = $2
+        AND vigencia IS NOT DISTINCT FROM $3
+        AND ($4::uuid IS NULL OR id <> $4::uuid)
+      LIMIT 1`,
+    [tenantId, classGroupId, vigencia, excludeId ?? null],
+  )
+  return row?.name ?? null
 }
 
 function conflictMessage(gridName: string, vigencia: string | null) {
   return `Esta turma já tem a grade "${gridName}" ${vigencia ? `na vigência ${vigencia}` : 'sem vigência'}. Escolha outra vigência ou edite a grade existente.`
 }
 
-async function resolveSchoolUnitId(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  classGroupId: string
-): Promise<{ school_unit_id: string | null; error: string | null }> {
-  const { data, error } = await supabase
-    .from('class_groups')
-    .select('school_unit_id')
-    .eq('id', classGroupId)
-    .eq('tenant_id', TENANT_ID)
-    .single()
-
-  if (error || !data) return { school_unit_id: null, error: 'Turma não encontrada.' }
-  return { school_unit_id: data.school_unit_id, error: null }
+async function resolveSchoolUnitId(q: Queryable, tenantId: string, classGroupId: string): Promise<string> {
+  const row = await q.one<{ school_unit_id: string }>(
+    'SELECT school_unit_id FROM class_groups WHERE id = $1 AND tenant_id = $2',
+    [classGroupId, tenantId],
+  )
+  if (!row) throw new UserError('Turma não encontrada.')
+  return row.school_unit_id
 }
 
-function flattenSlots(slotsByDay: SlotsByDay, gridId: string) {
-  const rows: Array<{
-    time_grid_id: string
-    day_of_week: number
-    slot_order: number
-    duration_minutes: number
-    start_time: string
-    end_time: string
-    type: SlotKind
-    label: string | null
-  }> = []
-
+function flattenSlots(slotsByDay: SlotsByDay): SlotRow[] {
+  const rows: SlotRow[] = []
   for (const [dayStr, slots] of Object.entries(slotsByDay)) {
     const day = Number(dayStr)
     slots.forEach((slot, idx) => {
       rows.push({
-        time_grid_id: gridId,
         day_of_week: day,
         slot_order: idx + 1,
         duration_minutes: slot.duration_minutes,
@@ -110,8 +105,19 @@ function flattenSlots(slotsByDay: SlotsByDay, gridId: string) {
       })
     })
   }
-
   return rows
+}
+
+async function insertSlots(q: Queryable, gridId: string, rows: SlotRow[]) {
+  if (rows.length === 0) return
+  const { values, params } = bulkValues(
+    rows.map((r) => [gridId, r.day_of_week, r.slot_order, r.duration_minutes, r.start_time, r.end_time, r.type, r.label]),
+  )
+  await q.query(
+    `INSERT INTO time_slots (time_grid_id, day_of_week, slot_order, duration_minutes, start_time, end_time, type, label)
+     VALUES ${values}`,
+    params,
+  )
 }
 
 /**
@@ -120,24 +126,16 @@ function flattenSlots(slotsByDay: SlotsByDay, gridId: string) {
  * de horários já gerados (schedule_entries.time_slot_id). Só insere os novos e remove
  * os que deixaram de existir.
  */
-async function syncTimeSlots(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  gridId: string,
-  rows: ReturnType<typeof flattenSlots>
-): Promise<string | null> {
-  const { data: existing, error: fetchError } = await supabase
-    .from('time_slots')
-    .select('id, day_of_week, slot_order')
-    .eq('time_grid_id', gridId)
-
-  if (fetchError) return fetchError.message
+async function syncTimeSlots(q: Queryable, gridId: string, rows: SlotRow[]) {
+  const existing = await q.query<{ id: string; day_of_week: number; slot_order: number }>(
+    'SELECT id, day_of_week, slot_order FROM time_slots WHERE time_grid_id = $1',
+    [gridId],
+  )
 
   const key = (day: number, order: number) => `${day}:${order}`
-  const existingByKey = new Map(
-    (existing ?? []).map((s) => [key(s.day_of_week, s.slot_order), s.id as string])
-  )
+  const existingByKey = new Map(existing.map((s) => [key(s.day_of_week, s.slot_order), s.id]))
   const keptKeys = new Set<string>()
-  const toInsert: typeof rows = []
+  const toInsert: SlotRow[] = []
 
   for (const row of rows) {
     const k = key(row.day_of_week, row.slot_order)
@@ -147,137 +145,87 @@ async function syncTimeSlots(
       continue
     }
     keptKeys.add(k)
-    const { error } = await supabase
-      .from('time_slots')
-      .update({
-        duration_minutes: row.duration_minutes,
-        start_time: row.start_time,
-        end_time: row.end_time,
-        type: row.type,
-        label: row.label,
-      })
-      .eq('id', slotId)
-    if (error) return error.message
+    await q.query(
+      'UPDATE time_slots SET duration_minutes = $1, start_time = $2, end_time = $3, type = $4, label = $5 WHERE id = $6',
+      [row.duration_minutes, row.start_time, row.end_time, row.type, row.label, slotId],
+    )
   }
 
-  const toDeleteIds = [...existingByKey.entries()]
-    .filter(([k]) => !keptKeys.has(k))
-    .map(([, slotId]) => slotId)
-
+  const toDeleteIds = [...existingByKey.entries()].filter(([k]) => !keptKeys.has(k)).map(([, id]) => id)
   if (toDeleteIds.length > 0) {
-    const { error } = await supabase.from('time_slots').delete().in('id', toDeleteIds)
-    if (error) {
-      if (error.code === '23503') {
-        return 'Não é possível remover horários que já são usados em um horário gerado. Exclua esse horário gerado antes ou mantenha a quantidade de slots.'
-      }
-      return error.message
+    try {
+      await q.query('DELETE FROM time_slots WHERE id = ANY($1::uuid[])', [toDeleteIds])
+    } catch (e) {
+      if (isForeignKeyViolation(e)) throw new UserError(SLOT_IN_USE)
+      throw e
     }
   }
 
-  if (toInsert.length > 0) {
-    const { error } = await supabase.from('time_slots').insert(toInsert)
-    if (error) return error.message
-  }
+  await insertSlots(q, gridId, toInsert)
+}
 
-  return null
+/** editorAction + erros de negócio (UserError) como mensagem. */
+function gridAction(fn: (p: SessionProfile) => Promise<ActionResult | void>): Promise<ActionResult> {
+  return editorAction(async (p) => {
+    try {
+      return await fn(p)
+    } catch (e) {
+      if (e instanceof UserError) return { success: false, error: e.message }
+      throw e
+    }
+  })
 }
 
 // ─── Actions ──────────────────────────────────────────────────────────────────
 
-export async function createTimeGrid(
-  gridData: GridData,
-  slotsByDay: SlotsByDay
-): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
+export async function createTimeGrid(gridData: GridData, slotsByDay: SlotsByDay): Promise<ActionResult> {
+  return gridAction(async (p) => {
+    const classGroupId = gridData.class_group_id
+    if (!classGroupId) return { success: false, error: 'Turma é obrigatória.' }
+    const vigencia = normalizeVigencia(gridData.vigencia)
 
-  const supabase = await createClient()
+    await tx(p.id, async (q) => {
+      const schoolUnitId = await resolveSchoolUnitId(q, p.tenant_id, classGroupId)
+      const conflict = await findConflictingGrid(q, p.tenant_id, classGroupId, vigencia)
+      if (conflict) throw new UserError(conflictMessage(conflict, vigencia))
 
-  if (!gridData.class_group_id) return { success: false, error: 'Turma é obrigatória.' }
-
-  const { school_unit_id, error: resolveError } = await resolveSchoolUnitId(
-    supabase,
-    gridData.class_group_id
-  )
-  if (resolveError || !school_unit_id) return { success: false, error: resolveError ?? 'Turma inválida.' }
-
-  const vigencia = normalizeVigencia(gridData.vigencia)
-  const conflict = await findConflictingGrid(supabase, gridData.class_group_id, vigencia)
-  if (conflict) return { success: false, error: conflictMessage(conflict, vigencia) }
-
-  const { data: grid, error: gridError } = await supabase
-    .from('time_grids')
-    .insert({
-      tenant_id: TENANT_ID,
-      school_unit_id,
-      class_group_id: gridData.class_group_id,
-      name: gridData.name,
-      shift: gridData.shift,
-      start_time: gridData.start_time,
-      days_of_week: gridData.days_of_week,
-      vigencia,
-      active: true,
+      const grid = await q.one<{ id: string }>(
+        `INSERT INTO time_grids
+           (tenant_id, school_unit_id, class_group_id, name, shift, start_time, days_of_week, vigencia, active)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::int[], $8, true)
+         RETURNING id`,
+        [p.tenant_id, schoolUnitId, classGroupId, gridData.name, gridData.shift, gridData.start_time, gridData.days_of_week, vigencia],
+      )
+      await insertSlots(q, grid!.id, flattenSlots(slotsByDay))
     })
-    .select('id')
-    .single()
 
-  if (gridError || !grid) {
-    return { success: false, error: gridError?.message ?? 'Erro ao criar grade.' }
-  }
-
-  const rows = flattenSlots(slotsByDay, grid.id)
-  if (rows.length > 0) {
-    const { error: slotsError } = await supabase.from('time_slots').insert(rows)
-    if (slotsError) return { success: false, error: slotsError.message }
-  }
-
-  revalidatePath('/dashboard/grids')
-  return { success: true }
+    revalidatePath('/dashboard/grids')
+  })
 }
 
-export async function updateTimeGrid(
-  id: string,
-  gridData: GridData,
-  slotsByDay: SlotsByDay
-): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
+export async function updateTimeGrid(id: string, gridData: GridData, slotsByDay: SlotsByDay): Promise<ActionResult> {
+  return gridAction(async (p) => {
+    const classGroupId = gridData.class_group_id
+    if (!classGroupId) return { success: false, error: 'Turma é obrigatória.' }
+    const vigencia = normalizeVigencia(gridData.vigencia)
 
-  const supabase = await createClient()
+    await tx(p.id, async (q) => {
+      const schoolUnitId = await resolveSchoolUnitId(q, p.tenant_id, classGroupId)
+      const conflict = await findConflictingGrid(q, p.tenant_id, classGroupId, vigencia, id)
+      if (conflict) throw new UserError(conflictMessage(conflict, vigencia))
 
-  if (!gridData.class_group_id) return { success: false, error: 'Turma é obrigatória.' }
-
-  const { school_unit_id, error: resolveError } = await resolveSchoolUnitId(
-    supabase,
-    gridData.class_group_id
-  )
-  if (resolveError || !school_unit_id) return { success: false, error: resolveError ?? 'Turma inválida.' }
-
-  const vigencia = normalizeVigencia(gridData.vigencia)
-  const conflict = await findConflictingGrid(supabase, gridData.class_group_id, vigencia, id)
-  if (conflict) return { success: false, error: conflictMessage(conflict, vigencia) }
-
-  const { error: gridError } = await supabase
-    .from('time_grids')
-    .update({
-      school_unit_id,
-      class_group_id: gridData.class_group_id,
-      name: gridData.name,
-      shift: gridData.shift,
-      start_time: gridData.start_time,
-      days_of_week: gridData.days_of_week,
-      vigencia,
+      await q.query(
+        `UPDATE time_grids
+            SET school_unit_id = $1, class_group_id = $2, name = $3, shift = $4, start_time = $5,
+                days_of_week = $6::int[], vigencia = $7
+          WHERE id = $8 AND tenant_id = $9`,
+        [schoolUnitId, classGroupId, gridData.name, gridData.shift, gridData.start_time, gridData.days_of_week, vigencia, id, p.tenant_id],
+      )
+      await syncTimeSlots(q, id, flattenSlots(slotsByDay))
     })
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
 
-  if (gridError) return { success: false, error: gridError.message }
-
-  const syncError = await syncTimeSlots(supabase, id, flattenSlots(slotsByDay, id))
-  if (syncError) return { success: false, error: syncError }
-
-  revalidatePath('/dashboard/grids')
-  return { success: true }
+    revalidatePath('/dashboard/grids')
+  })
 }
 
 type GridWithSlots = {
@@ -286,23 +234,20 @@ type GridWithSlots = {
   class_group_id: string | null
   name: string
   shift: string
-  start_time: string
+  start_time: string | null
   days_of_week: number[]
   active: boolean
   vigencia: string | null
-  time_slots: Array<{
-    day_of_week: number
-    slot_order: number
-    duration_minutes: number
-    start_time: string
-    end_time: string
-    type: SlotKind
-    label: string | null
-  }> | null
+  time_slots: SlotRow[]
 }
 
-const GRID_WITH_SLOTS =
-  'id, school_unit_id, class_group_id, name, shift, start_time, days_of_week, active, vigencia, time_slots(day_of_week, slot_order, duration_minutes, start_time, end_time, type, label)'
+const GRID_WITH_SLOTS = `
+  SELECT g.id, g.school_unit_id, g.class_group_id, g.name, g.shift, g.start_time, g.days_of_week, g.active, g.vigencia,
+         coalesce((SELECT json_agg(json_build_object(
+                     'day_of_week', s.day_of_week, 'slot_order', s.slot_order, 'duration_minutes', s.duration_minutes,
+                     'start_time', s.start_time, 'end_time', s.end_time, 'type', s.type, 'label', s.label))
+                     FROM time_slots s WHERE s.time_grid_id = g.id), '[]') AS time_slots
+    FROM time_grids g`
 
 /** Nome da cópia: troca a vigência de origem pela de destino; sem ela no nome, acrescenta. */
 function copyName(name: string, from: string | null, to: string | null): string {
@@ -313,46 +258,30 @@ function copyName(name: string, from: string | null, to: string | null): string 
 
 /** Copia a grade com seus slots para a vigência de destino. */
 async function copyGrid(
-  supabase: Supabase,
+  q: Queryable,
+  tenantId: string,
   original: GridWithSlots,
   vigencia: string | null,
-  keepClassGroup: boolean
-): Promise<string | null> {
-  const { data: newGrid, error: insertError } = await supabase
-    .from('time_grids')
-    .insert({
-      tenant_id: TENANT_ID,
-      school_unit_id: original.school_unit_id,
-      class_group_id: keepClassGroup ? original.class_group_id : null,
-      name: copyName(original.name, original.vigencia, vigencia),
-      shift: original.shift,
-      start_time: original.start_time,
-      days_of_week: original.days_of_week,
+  keepClassGroup: boolean,
+) {
+  const grid = await q.one<{ id: string }>(
+    `INSERT INTO time_grids
+       (tenant_id, school_unit_id, class_group_id, name, shift, start_time, days_of_week, vigencia, active)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::int[], $8, $9)
+     RETURNING id`,
+    [
+      tenantId,
+      original.school_unit_id,
+      keepClassGroup ? original.class_group_id : null,
+      copyName(original.name, original.vigencia, vigencia),
+      original.shift,
+      original.start_time,
+      original.days_of_week,
       vigencia,
-      active: original.active,
-    })
-    .select('id')
-    .single()
-
-  if (insertError || !newGrid) return insertError?.message ?? 'Erro ao duplicar grade.'
-
-  const slots = original.time_slots ?? []
-  if (slots.length > 0) {
-    const { error: slotsError } = await supabase.from('time_slots').insert(
-      slots.map((s) => ({
-        time_grid_id: newGrid.id,
-        day_of_week: s.day_of_week,
-        slot_order: s.slot_order,
-        duration_minutes: s.duration_minutes,
-        start_time: s.start_time,
-        end_time: s.end_time,
-        type: s.type,
-        label: s.label,
-      }))
-    )
-    if (slotsError) return slotsError.message
-  }
-  return null
+      original.active,
+    ],
+  )
+  await insertSlots(q, grid!.id, original.time_slots)
 }
 
 /**
@@ -361,102 +290,79 @@ async function copyGrid(
  */
 export async function duplicateTimeGrid(
   id: string,
-  targetVigencia: string | null
+  targetVigencia: string | null,
 ): Promise<ActionResult & { keptClassGroup?: boolean }> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
+  let keptClassGroup = false
+  const result = await gridAction(async (p) => {
+    const original = await db.one<GridWithSlots>(`${GRID_WITH_SLOTS} WHERE g.id = $1 AND g.tenant_id = $2`, [
+      id,
+      p.tenant_id,
+    ])
+    if (!original) return { success: false, error: 'Grade original não encontrada.' }
 
-  const supabase = await createClient()
+    const vigencia = normalizeVigencia(targetVigencia)
+    await tx(p.id, async (q) => {
+      keptClassGroup =
+        !!original.class_group_id &&
+        !(await findConflictingGrid(q, p.tenant_id, original.class_group_id, vigencia))
+      await copyGrid(q, p.tenant_id, original, vigencia, keptClassGroup)
+    })
 
-  const { data: original, error: fetchError } = await supabase
-    .from('time_grids')
-    .select(GRID_WITH_SLOTS)
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-    .single()
-
-  if (fetchError || !original) return { success: false, error: 'Grade original não encontrada.' }
-
-  const grid = original as unknown as GridWithSlots
-  const vigencia = normalizeVigencia(targetVigencia)
-  const keepClassGroup =
-    !!grid.class_group_id &&
-    !(await findConflictingGrid(supabase, grid.class_group_id, vigencia))
-
-  const error = await copyGrid(supabase, grid, vigencia, keepClassGroup)
-  if (error) return { success: false, error }
-
-  revalidatePath('/dashboard/grids')
-  return { success: true, keptClassGroup: keepClassGroup }
+    revalidatePath('/dashboard/grids')
+  })
+  return result.success ? { ...result, keptClassGroup } : result
 }
 
 /** Copia todas as grades de uma vigência para uma nova vigência. */
 export async function duplicateVigencia(
   sourceVigencia: string | null,
-  targetVigencia: string
+  targetVigencia: string,
 ): Promise<ActionResult & { count?: number; skipped?: number }> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-  const source = normalizeVigencia(sourceVigencia)
-  const target = normalizeVigencia(targetVigencia)
-
-  if (!target) return { success: false, error: 'Informe o nome da nova vigência.' }
-  if (target === source) return { success: false, error: 'A nova vigência deve ser diferente da atual.' }
-
-  let q = supabase.from('time_grids').select(GRID_WITH_SLOTS).eq('tenant_id', TENANT_ID)
-  q = source === null ? q.is('vigencia', null) : q.eq('vigencia', source)
-  const { data: grids, error: fetchError } = await q
-  if (fetchError) return { success: false, error: fetchError.message }
-
-  // Turmas que já têm grade na vigência de destino são puladas.
-  const { data: existing } = await supabase
-    .from('time_grids')
-    .select('class_group_id')
-    .eq('tenant_id', TENANT_ID)
-    .eq('vigencia', target)
-  const taken = new Set((existing ?? []).map((g) => g.class_group_id).filter(Boolean))
-
   let count = 0
   let skipped = 0
-  for (const g of (grids ?? []) as unknown as GridWithSlots[]) {
-    if (g.class_group_id && taken.has(g.class_group_id)) {
-      skipped++
-      continue
-    }
-    const error = await copyGrid(supabase, g, target, true)
-    if (error) return { success: false, error, count, skipped }
-    count++
-  }
+  const result = await gridAction(async (p) => {
+    const source = normalizeVigencia(sourceVigencia)
+    const target = normalizeVigencia(targetVigencia)
 
-  revalidatePath('/dashboard/grids')
-  return { success: true, count, skipped }
+    if (!target) return { success: false, error: 'Informe o nome da nova vigência.' }
+    if (target === source) return { success: false, error: 'A nova vigência deve ser diferente da atual.' }
+
+    const grids = await db.query<GridWithSlots>(
+      `${GRID_WITH_SLOTS} WHERE g.tenant_id = $1 AND g.vigencia IS NOT DISTINCT FROM $2`,
+      [p.tenant_id, source],
+    )
+
+    await tx(p.id, async (q) => {
+      // Turmas que já têm grade na vigência de destino são puladas.
+      const existing = await q.query<{ class_group_id: string | null }>(
+        'SELECT class_group_id FROM time_grids WHERE tenant_id = $1 AND vigencia = $2',
+        [p.tenant_id, target],
+      )
+      const taken = new Set(existing.map((g) => g.class_group_id).filter(Boolean))
+      for (const g of grids) {
+        if (g.class_group_id && taken.has(g.class_group_id)) {
+          skipped++
+          continue
+        }
+        await copyGrid(q, p.tenant_id, g, target, true)
+        count++
+      }
+    })
+
+    revalidatePath('/dashboard/grids')
+  })
+  return result.success ? { ...result, count, skipped } : result
 }
 
 export async function toggleGridStatus(id: string): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { data: grid, error: fetchError } = await supabase
-    .from('time_grids')
-    .select('active')
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-    .single()
-
-  if (fetchError || !grid) return { success: false, error: 'Grade não encontrada.' }
-
-  const { error } = await supabase
-    .from('time_grids')
-    .update({ active: !grid.active })
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/grids')
-  return { success: true }
+  return editorAction(async (p) => {
+    const rows = await tx(p.id, (q) =>
+      q.query('UPDATE time_grids SET active = NOT active WHERE id = $1 AND tenant_id = $2 RETURNING id', [
+        id,
+        p.tenant_id,
+      ]),
+    )
+    if (rows.length === 0) return { success: false, error: 'Grade não encontrada.' }
+    revalidatePath('/dashboard/grids')
+  })
 }

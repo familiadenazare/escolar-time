@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-vi.mock('@/lib/supabase/admin', () => ({ adminSupabase: {} }))
+vi.mock('@/lib/db', () => ({ db: {} }))
 
 import { pickGrid, type RawTimeGrid } from './data-loader'
 

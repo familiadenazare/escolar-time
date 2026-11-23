@@ -1,27 +1,11 @@
 'use client'
 
 import { useState } from 'react'
-import Link from 'next/link'
-import { useRouter } from 'next/navigation'
-import { useForm } from 'react-hook-form'
-import { zodResolver } from '@hookform/resolvers/zod'
-import { z } from 'zod'
 import { Loader2 } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
-import { createClient } from '@/lib/supabase/client'
 import { ALLOWED_EMAIL_DOMAIN } from '@/lib/auth/allowed-domain'
-import { loginAction } from './actions'
-
-const loginSchema = z.object({
-  email: z.string().email('E-mail inválido'),
-  password: z.string().min(1, 'Senha obrigatória'),
-})
-
-type LoginFormValues = z.infer<typeof loginSchema>
 
 const CALLBACK_ERRORS: Record<string, string> = {
   domain: `Use uma conta Google @${ALLOWED_EMAIL_DOMAIN}.`,
@@ -42,145 +26,35 @@ function GoogleIcon() {
   )
 }
 
+/** Login só com a conta Google da escola (o app não guarda senhas). */
 export function LoginForm({ callbackError }: { callbackError?: string }) {
-  const router = useRouter()
-  const [serverError, setServerError] = useState<string | null>(
-    callbackError ? (CALLBACK_ERRORS[callbackError] ?? CALLBACK_ERRORS.oauth) : null
-  )
-  const [googleLoading, setGoogleLoading] = useState(false)
-
-  async function onGoogleLogin() {
-    setServerError(null)
-    setGoogleLoading(true)
-
-    const { error } = await createClient().auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        redirectTo: `${window.location.origin}/auth/callback`,
-        // `hd` apenas filtra o seletor de contas do Google; a validação real
-        // do domínio é feita no servidor em /auth/callback.
-        queryParams: { hd: ALLOWED_EMAIL_DOMAIN, prompt: 'select_account' },
-      },
-    })
-
-    // Em caso de sucesso o navegador já está sendo redirecionado ao Google.
-    if (error) {
-      setServerError(CALLBACK_ERRORS.oauth)
-      setGoogleLoading(false)
-    }
-  }
-
-  const {
-    register,
-    handleSubmit,
-    formState: { errors, isSubmitting },
-  } = useForm<LoginFormValues>({
-    resolver: zodResolver(loginSchema),
-  })
-
-  async function onSubmit(data: LoginFormValues) {
-    setServerError(null)
-    const result = await loginAction(data.email, data.password)
-
-    if (!result.success) {
-      setServerError(result.error ?? 'Erro inesperado. Tente novamente.')
-      return
-    }
-
-    router.push('/dashboard')
-  }
+  const [loading, setLoading] = useState(false)
+  const error = callbackError ? (CALLBACK_ERRORS[callbackError] ?? CALLBACK_ERRORS.oauth) : null
 
   return (
     <Card className="w-full max-w-md mx-4 shadow-xl border-0">
       <CardHeader className="pb-2 text-center">
-        <h1 className="text-3xl font-bold text-navy tracking-tight">
-          EscolarTime
-        </h1>
+        <h1 className="text-3xl font-bold text-navy tracking-tight">EscolarTime</h1>
         <p className="text-sm text-slate mt-1">
-          Acesse sua conta para continuar
+          Entre com a sua conta Google @{ALLOWED_EMAIL_DOMAIN}
         </p>
       </CardHeader>
 
-      <CardContent className="pt-4">
-        <form onSubmit={handleSubmit(onSubmit)} noValidate className="space-y-5">
-          <div className="space-y-1.5">
-            <Label htmlFor="email">E-mail</Label>
-            <Input
-              id="email"
-              type="email"
-              placeholder="seu@email.com"
-              autoComplete="email"
-              {...register('email')}
-            />
-            {errors.email && (
-              <p className="text-xs text-red-500">{errors.email.message}</p>
-            )}
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="password">Senha</Label>
-            <Input
-              id="password"
-              type="password"
-              placeholder="••••••••"
-              autoComplete="current-password"
-              {...register('password')}
-            />
-            {errors.password && (
-              <p className="text-xs text-red-500">{errors.password.message}</p>
-            )}
-            <div className="text-right">
-              <Link
-                href="/forgot-password"
-                className="text-xs font-medium text-navy hover:underline"
-              >
-                Esqueci minha senha
-              </Link>
-            </div>
-          </div>
-
-          {serverError && (
-            <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-md px-3 py-2">
-              {serverError}
-            </p>
-          )}
-
-          <Button
-            type="submit"
-            disabled={isSubmitting}
-            className="w-full bg-navy hover:bg-navy-light text-white font-semibold h-11 cursor-pointer"
-          >
-            {isSubmitting ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Entrando…
-              </>
-            ) : (
-              'Entrar'
-            )}
-          </Button>
-
-          <div className="flex items-center gap-3 text-xs text-slate">
-            <span className="h-px flex-1 bg-gray-200" />
-            ou
-            <span className="h-px flex-1 bg-gray-200" />
-          </div>
-
-          <Button
-            type="button"
-            variant="outline"
-            onClick={onGoogleLogin}
-            disabled={googleLoading || isSubmitting}
-            className="w-full h-11 font-medium cursor-pointer"
-          >
-            {googleLoading ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : (
-              <GoogleIcon />
-            )}
-            Entrar com Google
-          </Button>
-        </form>
+      <CardContent className="pt-4 space-y-5">
+        {error && (
+          <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-md px-3 py-2">
+            {error}
+          </p>
+        )}
+        <Button
+          nativeButton={false}
+          render={<a href="/auth/google" />}
+          onClick={() => setLoading(true)}
+          className="w-full h-11 bg-navy hover:bg-navy-light text-white font-semibold cursor-pointer"
+        >
+          {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <GoogleIcon />}
+          Entrar com Google
+        </Button>
       </CardContent>
     </Card>
   )

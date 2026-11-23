@@ -1,26 +1,21 @@
 import { notFound, redirect } from 'next/navigation'
 import { getEditorProfile } from '@/lib/auth/session'
-import { createClient } from '@/lib/supabase/server'
+import { db } from '@/lib/db'
 import { SubjectForm } from '@/components/subjects/subject-form'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
 
 export default async function EditSubjectPage({
   params,
 }: {
   params: Promise<{ id: string }>
 }) {
-  if (!(await getEditorProfile())) redirect('/dashboard/subjects')
+  const editor = await getEditorProfile()
+  if (!editor) redirect('/dashboard/subjects')
 
   const { id } = await params
-  const supabase = await createClient()
-
-  const { data: subject } = await supabase
-    .from('subjects')
-    .select('id, name, code, color, active')
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-    .single()
+  const subject = await db.one<{ id: string; name: string; code: string; color: string; active: boolean }>(
+    'SELECT id, name, code, color, active FROM subjects WHERE id = $1 AND tenant_id = $2',
+    [id, editor.tenant_id],
+  )
 
   if (!subject) notFound()
 

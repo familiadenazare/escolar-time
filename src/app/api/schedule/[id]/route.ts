@@ -1,8 +1,6 @@
 import { NextResponse } from 'next/server'
-import { adminSupabaseAs } from '@/lib/supabase/admin'
 import { requireEditor } from '@/lib/auth/api'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
+import { run } from '@/lib/db'
 
 /**
  * Exclusão lógica: o horário some da listagem, mas fica no histórico de apagados
@@ -18,26 +16,20 @@ export async function DELETE(
   if (!auth.ok) return auth.response
   const { user } = auth
 
-  const adminSupabase = adminSupabaseAs(user.id)
-
-  const { data, error } = await adminSupabase
-    .from('generated_schedules')
-    .update({
-      deleted_at: new Date().toISOString(),
-      deleted_by: user.id,
-      deleted_reason: 'manual',
-      is_baseline: false,
-    })
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-    .is('deleted_at', null)
-    .select('id')
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
-  if (!data || data.length === 0) {
-    return NextResponse.json({ error: 'Horário não encontrado.' }, { status: 404 })
+  try {
+    const rows = await run(
+      user.id,
+      `UPDATE generated_schedules
+          SET deleted_at = now(), deleted_by = $1, deleted_reason = 'manual', is_baseline = false
+        WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL
+        RETURNING id`,
+      [user.id, id, user.tenant_id],
+    )
+    if (rows.length === 0) {
+      return NextResponse.json({ error: 'Horário não encontrado.' }, { status: 404 })
+    }
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 })
   }
 
   return NextResponse.json({ success: true })

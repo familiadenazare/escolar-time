@@ -1,10 +1,8 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
-import { createClient } from '@/lib/supabase/server'
-import { denyIfReadOnly } from '@/lib/auth/session'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
+import { run } from '@/lib/db'
+import { editorAction, type ActionResult } from '@/lib/actions'
 
 type GlobalRuleType =
   | 'SINGLE_UNIT_PER_DAY'
@@ -24,113 +22,60 @@ type CreateGlobalRuleData = {
   description?: string | null
 }
 
-type ActionResult = { success: boolean; error?: string }
+const PATH = '/dashboard/constraints/rules'
 
 export async function createGlobalRule(data: CreateGlobalRuleData): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { error } = await supabase.from('global_rules').insert({
-    tenant_id: TENANT_ID,
-    type: data.type,
-    priority: data.priority,
-    weight: data.weight,
-    params: data.params ?? null,
-    description: data.description ?? null,
-    active: true,
+  return editorAction(async (p) => {
+    await run(
+      p.id,
+      `INSERT INTO global_rules (tenant_id, type, priority, weight, params, description, active)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, true)`,
+      [
+        p.tenant_id,
+        data.type,
+        data.priority,
+        data.weight,
+        data.params == null ? null : JSON.stringify(data.params),
+        data.description ?? null,
+      ],
+    )
+    revalidatePath(PATH)
   })
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/constraints/rules')
-  return { success: true }
 }
 
-export async function updateGlobalRuleWeight(
-  id: string,
-  weight: number
-): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { error } = await supabase
-    .from('global_rules')
-    .update({ weight })
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/constraints/rules')
-  return { success: true }
+export async function updateGlobalRuleWeight(id: string, weight: number): Promise<ActionResult> {
+  return editorAction(async (p) => {
+    await run(p.id, 'UPDATE global_rules SET weight = $1 WHERE id = $2 AND tenant_id = $3', [weight, id, p.tenant_id])
+    revalidatePath(PATH)
+  })
 }
 
-export async function updateGlobalRuleParams(
-  id: string,
-  params: Record<string, unknown>
-): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { error } = await supabase
-    .from('global_rules')
-    .update({ params })
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/constraints/rules')
-  return { success: true }
+export async function updateGlobalRuleParams(id: string, params: Record<string, unknown>): Promise<ActionResult> {
+  return editorAction(async (p) => {
+    await run(p.id, 'UPDATE global_rules SET params = $1::jsonb WHERE id = $2 AND tenant_id = $3', [
+      JSON.stringify(params),
+      id,
+      p.tenant_id,
+    ])
+    revalidatePath(PATH)
+  })
 }
 
 export async function toggleGlobalRule(id: string): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { data: rule, error: fetchError } = await supabase
-    .from('global_rules')
-    .select('active')
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-    .single()
-
-  if (fetchError || !rule) return { success: false, error: 'Regra não encontrada.' }
-
-  const { error } = await supabase
-    .from('global_rules')
-    .update({ active: !rule.active })
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/constraints/rules')
-  return { success: true }
+  return editorAction(async (p) => {
+    const rows = await run(
+      p.id,
+      'UPDATE global_rules SET active = NOT active WHERE id = $1 AND tenant_id = $2 RETURNING id',
+      [id, p.tenant_id],
+    )
+    if (rows.length === 0) return { success: false, error: 'Regra não encontrada.' }
+    revalidatePath(PATH)
+  })
 }
 
 export async function deleteGlobalRule(id: string): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { error } = await supabase
-    .from('global_rules')
-    .delete()
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/constraints/rules')
-  return { success: true }
+  return editorAction(async (p) => {
+    await run(p.id, 'DELETE FROM global_rules WHERE id = $1 AND tenant_id = $2', [id, p.tenant_id])
+    revalidatePath(PATH)
+  })
 }

@@ -1,10 +1,8 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
-import { createClient } from '@/lib/supabase/server'
-import { denyIfReadOnly } from '@/lib/auth/session'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
+import { run } from '@/lib/db'
+import { editorAction, type ActionResult } from '@/lib/actions'
 
 type FormData = {
   name: string
@@ -13,74 +11,36 @@ type FormData = {
   active?: boolean
 }
 
-type ActionResult = { success: boolean; error?: string }
-
 export async function createSubject(data: FormData): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { error } = await supabase.from('subjects').insert({
-    tenant_id: TENANT_ID,
-    name: data.name,
-    code: data.code.toUpperCase(),
-    color: data.color,
-    active: data.active ?? true,
+  return editorAction(async (p) => {
+    await run(
+      p.id,
+      'INSERT INTO subjects (tenant_id, name, code, color, active) VALUES ($1, $2, $3, $4, $5)',
+      [p.tenant_id, data.name, data.code.toUpperCase(), data.color, data.active ?? true],
+    )
+    revalidatePath('/dashboard/subjects')
   })
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/subjects')
-  return { success: true }
 }
 
 export async function updateSubject(id: string, data: FormData): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { error } = await supabase
-    .from('subjects')
-    .update({
-      name: data.name,
-      code: data.code.toUpperCase(),
-      color: data.color,
-      active: data.active ?? true,
-    })
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/subjects')
-  return { success: true }
+  return editorAction(async (p) => {
+    await run(
+      p.id,
+      'UPDATE subjects SET name = $1, code = $2, color = $3, active = $4 WHERE id = $5 AND tenant_id = $6',
+      [data.name, data.code.toUpperCase(), data.color, data.active ?? true, id, p.tenant_id],
+    )
+    revalidatePath('/dashboard/subjects')
+  })
 }
 
 export async function toggleSubjectStatus(id: string): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { data: subject, error: fetchError } = await supabase
-    .from('subjects')
-    .select('active')
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-    .single()
-
-  if (fetchError || !subject) return { success: false, error: 'Disciplina não encontrada.' }
-
-  const { error } = await supabase
-    .from('subjects')
-    .update({ active: !subject.active })
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/subjects')
-  return { success: true }
+  return editorAction(async (p) => {
+    const rows = await run(
+      p.id,
+      'UPDATE subjects SET active = NOT active WHERE id = $1 AND tenant_id = $2 RETURNING id',
+      [id, p.tenant_id],
+    )
+    if (rows.length === 0) return { success: false, error: 'Disciplina não encontrada.' }
+    revalidatePath('/dashboard/subjects')
+  })
 }
