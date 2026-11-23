@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { createClient } from '@/lib/supabase/server'
+import { getSessionProfile } from '@/lib/auth/session'
 import { Sidebar } from '@/components/layout/sidebar'
 import { CanEditProvider } from '@/components/auth/can-edit'
 import { canEdit } from '@/lib/auth/roles'
@@ -9,34 +9,24 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode
 }) {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-
-  if (!user) redirect('/login')
-
-  // A RLS esconde o perfil de usuário desativado: sem perfil ativo, sem acesso.
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('name, email, role')
-    .eq('id', user.id)
-    .eq('active', true)
-    .maybeSingle()
-
+  // Sem perfil ativo (cookie inválido ou perfil desativado), sem acesso.
+  const profile = await getSessionProfile()
   if (!profile) redirect('/auth/signout?error=inactive')
 
   const editor = canEdit(profile.role)
 
   return (
     <CanEditProvider canEdit={editor}>
-      <div className="flex min-h-screen">
+      <div className="flex min-h-screen flex-col md:flex-row">
         <Sidebar
-          userName={profile.name ?? user.email ?? 'Usuário'}
-          userEmail={profile.email ?? user.email ?? ''}
+          userName={profile.name || profile.email}
+          userEmail={profile.email}
+          role={profile.role}
           isAdmin={profile.role === 'ADMIN'}
           canEdit={editor}
         />
-        <main className="flex-1 bg-white overflow-y-auto">
-          <div className="p-8">
+        <main className="min-w-0 flex-1 overflow-y-auto bg-paper">
+          <div className="p-4 md:p-8">
             {children}
           </div>
         </main>

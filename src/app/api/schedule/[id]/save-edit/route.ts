@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
-import { adminSupabaseAs } from '@/lib/supabase/admin'
+import { tx } from '@/lib/db'
 import { validateEditedSchedule } from '@/engine/index'
 import {
-  TENANT_ID,
   badRequest,
+  insertScheduleEntries,
   lessonsSchema,
   loadEditableSchedule,
   parseJson,
@@ -31,8 +31,7 @@ export async function POST(
 
   const loaded = await loadEditableSchedule(id)
   if (!loaded.ok) return loaded.response
-  const { userId, schedule: original } = loaded
-  const adminSupabase = adminSupabaseAs(userId)
+  const { userId, tenantId, schedule: original } = loaded
 
   const parsed = bodySchema.safeParse(await parseJson(request))
   if (!parsed.success) return badRequest(parsed.error)
@@ -44,7 +43,7 @@ export async function POST(
   let result
   try {
     result = await validateEditedSchedule(
-      TENANT_ID,
+      tenantId,
       entries,
       baselineScheduleId ?? undefined,
       original.baseline_weight,
@@ -66,90 +65,59 @@ export async function POST(
     parsed.data.name ||
     (mode === 'replace' ? original.name : `${original.name} (editado)`)
 
-  // 1. Novo horário
-  const { data: created, error: insertError } = await adminSupabase
-    .from('generated_schedules')
-    .insert({
-      tenant_id: TENANT_ID,
-      name,
-      status: 'COMPLETED',
-      score: result.score,
-      violations: result.softViolations,
-      baseline_weight: original.baseline_weight,
-      created_by: userId,
-      config_snapshot: {
-        manualEdit: true,
-        editedFrom: original.id,
-        editMode: mode,
-        baselineScheduleId,
-        ...(vigencia !== undefined ? { vigencia } : {}),
-        warnings: [],
-      },
+  // Novo horário + aulas + (na substituição) baseline e aposentadoria do original:
+  // tudo numa transação — ou fica tudo gravado, ou nada.
+  try {
+    const createdId = await tx(userId, async (q) => {
+      const created = await q.one<{ id: string }>(
+        `INSERT INTO generated_schedules
+           (tenant_id, name, status, score, violations, baseline_weight, created_by, config_snapshot)
+         VALUES ($1, $2, 'COMPLETED', $3, $4::jsonb, $5, $6, $7::jsonb)
+         RETURNING id`,
+        [
+          tenantId,
+          name,
+          result.score,
+          JSON.stringify(result.softViolations ?? null),
+          original.baseline_weight,
+          userId,
+          JSON.stringify({
+            manualEdit: true,
+            editedFrom: original.id,
+            editMode: mode,
+            baselineScheduleId,
+            ...(vigencia !== undefined ? { vigencia } : {}),
+            warnings: [],
+          }),
+        ],
+      )
+      const newId = created!.id
+
+      await insertScheduleEntries(q, newId, entries)
+
+      if (mode === 'replace') {
+        if (original.is_baseline) {
+          await q.query('UPDATE generated_schedules SET is_baseline = false WHERE tenant_id = $1 AND is_baseline', [
+            tenantId,
+          ])
+          await q.query('UPDATE generated_schedules SET is_baseline = true WHERE id = $1', [newId])
+        }
+        await q.query(
+          `UPDATE generated_schedules
+              SET deleted_at = now(), deleted_by = $1, deleted_reason = 'replaced_by_edit',
+                  replaced_by = $2, is_baseline = false
+            WHERE id = $3 AND tenant_id = $4`,
+          [userId, newId, original.id, tenantId],
+        )
+      }
+      return newId
     })
-    .select('id')
-    .single()
 
-  if (insertError || !created) {
+    return NextResponse.json({ scheduleId: createdId, score: result.score })
+  } catch (e) {
     return NextResponse.json(
-      { error: `Erro ao criar o horário editado: ${insertError?.message ?? ''}` },
+      { error: `Erro ao salvar o horário editado: ${e instanceof Error ? e.message : String(e)}` },
       { status: 500 }
     )
   }
-
-  // 2. Aulas
-  const { error: entriesError } = await adminSupabase.from('schedule_entries').insert(
-    entries.map((e) => ({
-      generated_schedule_id: created.id,
-      teaching_assignment_id: e.assignmentId,
-      day_of_week: e.day,
-      time_slot_id: e.slotId,
-      locked: false,
-    }))
-  )
-
-  if (entriesError) {
-    // Registro novo sem aulas não serve para nada — remove (não é um horário do usuário ainda).
-    await adminSupabase.from('generated_schedules').delete().eq('id', created.id)
-    return NextResponse.json(
-      { error: `Erro ao gravar as aulas: ${entriesError.message}` },
-      { status: 500 }
-    )
-  }
-
-  // 3. Substituição: o novo herda o baseline e o original vai para o histórico de apagados.
-  if (mode === 'replace') {
-    if (original.is_baseline) {
-      await adminSupabase
-        .from('generated_schedules')
-        .update({ is_baseline: false })
-        .eq('tenant_id', TENANT_ID)
-        .eq('is_baseline', true)
-      await adminSupabase
-        .from('generated_schedules')
-        .update({ is_baseline: true })
-        .eq('id', created.id)
-    }
-
-    const { error: deleteError } = await adminSupabase
-      .from('generated_schedules')
-      .update({
-        deleted_at: new Date().toISOString(),
-        deleted_by: userId,
-        deleted_reason: 'replaced_by_edit',
-        replaced_by: created.id,
-        is_baseline: false,
-      })
-      .eq('id', original.id)
-      .eq('tenant_id', TENANT_ID)
-
-    if (deleteError) {
-      // O novo já está salvo; o original só não saiu da lista. Avisamos sem desfazer.
-      return NextResponse.json({
-        scheduleId: created.id,
-        warning: `Horário salvo, mas o original não pôde ser apagado: ${deleteError.message}`,
-      })
-    }
-  }
-
-  return NextResponse.json({ scheduleId: created.id, score: result.score })
 }

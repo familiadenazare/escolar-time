@@ -1,49 +1,44 @@
-import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
+import { SESSION_COOKIE, verifySessionToken } from '@/lib/auth/session-token'
+
+// Endereço antigo do programa de horários: tudo vai para o Pedagógico, no mesmo caminho.
+const LEGACY_HOSTS = new Set(['horarios.familiadenazare.com.br'])
+const CANONICAL_ORIGIN = 'https://pedagogico.familiadenazare.com.br'
+
+export function legacyRedirect(host: string | null, pathname: string, search: string): string | null {
+  const h = (host ?? '').split(':')[0].toLowerCase()
+  return LEGACY_HOSTS.has(h) ? `${CANONICAL_ORIGIN}${pathname}${search}` : null
+}
+
+// Só confere se o cookie de sessão é válido (sem banco). Se o perfil continua
+// ativo é conferido no layout do painel (getSessionProfile).
 export async function middleware(request: NextRequest) {
-  let supabaseResponse = NextResponse.next({ request })
-
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return request.cookies.getAll()
-        },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value }) =>
-            request.cookies.set(name, value)
-          )
-          supabaseResponse = NextResponse.next({ request })
-          cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set(name, value, options)
-          )
-        },
-      },
-    }
+  const legacy = legacyRedirect(
+    request.headers.get('x-forwarded-host') ?? request.headers.get('host'),
+    request.nextUrl.pathname,
+    request.nextUrl.search,
   )
+  if (legacy) return NextResponse.redirect(legacy, 308)
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-
+  const loggedIn = (await verifySessionToken(request.cookies.get(SESSION_COOKIE)?.value)) !== null
   const { pathname } = request.nextUrl
 
-  if (!user && pathname.startsWith('/dashboard')) {
-    const loginUrl = request.nextUrl.clone()
-    loginUrl.pathname = '/login'
-    return NextResponse.redirect(loginUrl)
+  if (!loggedIn && pathname.startsWith('/dashboard')) {
+    const url = request.nextUrl.clone()
+    url.pathname = '/login'
+    url.search = ''
+    return NextResponse.redirect(url)
   }
 
-  if (user && (pathname === '/login' || pathname === '/')) {
-    const dashboardUrl = request.nextUrl.clone()
-    dashboardUrl.pathname = '/dashboard'
-    return NextResponse.redirect(dashboardUrl)
+  if (loggedIn && (pathname === '/login' || pathname === '/')) {
+    const url = request.nextUrl.clone()
+    url.pathname = '/dashboard'
+    url.search = ''
+    return NextResponse.redirect(url)
   }
 
-  return supabaseResponse
+  return NextResponse.next()
 }
 
 export const config = {

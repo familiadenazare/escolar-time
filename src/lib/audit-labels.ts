@@ -1,4 +1,5 @@
 import { ROLE_LABELS, type RoleKey } from '@/lib/auth/roles'
+import { DIARY_STATUSES, DIARY_STATUS_INFO, monthName } from '@/lib/diaries/status'
 
 /** Linha de audit_log (migration 008). */
 export type AuditEntry = {
@@ -29,6 +30,9 @@ export const AREA_LABELS: Record<string, string> = {
   teacher_constraints: 'Restrição',
   global_rules: 'Regra global',
   generated_schedules: 'Horário',
+  diary_checks: 'Verificação de diário',
+  diary_extra_rows: 'Diário avulso',
+  em_links: 'Vínculo com o Escolar',
   profiles: 'Usuário',
   tenants: 'Instituição',
 }
@@ -89,6 +93,12 @@ const FIELD_LABELS: Record<string, string> = {
   replaced_by: 'Substituído por',
   config_snapshot: 'Configuração',
   violations: 'Violações',
+  month: 'Mês',
+  kind: 'Tipo',
+  em_key: 'Chave no Escolar',
+  local_id: 'Cadastro daqui',
+  ignored: 'Não usar',
+  auto: 'Ligado sozinho',
 }
 
 export function fieldLabel(field: string): string {
@@ -103,6 +113,7 @@ const HIDDEN_FIELDS = new Set([
   'updated_at',
   'created_by',
   'deleted_by',
+  'checked_by',
   'generated_schedule_id',
 ])
 
@@ -119,7 +130,13 @@ const DAY_NAMES: Record<number, string> = {
 
 const ENUM_LABELS: Record<string, Record<string, string>> = {
   shift: { MORNING: 'Matutino', AFTERNOON: 'Vespertino', EVENING: 'Noturno' },
-  status: { COMPLETED: 'Concluído', FAILED: 'Falhou', RUNNING: 'Gerando', PENDING: 'Pendente' },
+  status: {
+    COMPLETED: 'Concluído',
+    FAILED: 'Falhou',
+    RUNNING: 'Gerando',
+    PENDING: 'Pendente',
+    ...Object.fromEntries(DIARY_STATUSES.map((s) => [s, DIARY_STATUS_INFO[s].label])),
+  },
   deleted_reason: { manual: 'Excluído manualmente', replaced_by_edit: 'Substituído por edição' },
 }
 
@@ -154,6 +171,7 @@ export function formatValue(field: string, value: unknown, table?: string): stri
     return ENUM_LABELS[field][value]
   }
 
+  if (field === 'month' && typeof value === 'number') return monthName(value)
   if (field === 'day_of_week' && typeof value === 'number') return DAY_NAMES[value] ?? String(value)
   if (field === 'days_of_week' && Array.isArray(value)) {
     return value.map((d) => DAY_NAMES[Number(d)] ?? String(d)).join(', ') || '—'

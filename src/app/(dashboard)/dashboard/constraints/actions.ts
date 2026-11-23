@@ -1,10 +1,8 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
-import { createClient } from '@/lib/supabase/server'
-import { denyIfReadOnly } from '@/lib/auth/session'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
+import { run } from '@/lib/db'
+import { editorAction, type ActionResult } from '@/lib/actions'
 
 type ConstraintType =
   | 'UNAVAILABLE_SLOT'
@@ -36,78 +34,49 @@ type CreateConstraintData = {
   description?: string | null
 }
 
-type ActionResult = { success: boolean; error?: string }
-
 export async function createConstraint(data: CreateConstraintData): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { error } = await supabase.from('teacher_constraints').insert({
-    tenant_id: TENANT_ID,
-    teacher_id: data.teacher_id,
-    type: data.type,
-    priority: data.priority,
-    days_of_week: data.days_of_week,
-    school_unit_id: data.school_unit_id ?? null,
-    subject_id: data.subject_id ?? null,
-    time_from: data.time_from ?? null,
-    time_to: data.time_to ?? null,
-    slot_order: data.slot_order ?? null,
-    min_gap_slots: data.min_gap_slots ?? null,
-    value: data.value ?? null,
-    description: data.description ?? null,
-    active: true,
+  return editorAction(async (p) => {
+    await run(
+      p.id,
+      `INSERT INTO teacher_constraints
+         (tenant_id, teacher_id, type, priority, days_of_week, school_unit_id, subject_id,
+          time_from, time_to, slot_order, min_gap_slots, value, description, active)
+       VALUES ($1, $2, $3, $4, $5::int[], $6, $7, $8, $9, $10, $11, $12::jsonb, $13, true)`,
+      [
+        p.tenant_id,
+        data.teacher_id,
+        data.type,
+        data.priority,
+        data.days_of_week,
+        data.school_unit_id ?? null,
+        data.subject_id ?? null,
+        data.time_from ?? null,
+        data.time_to ?? null,
+        data.slot_order ?? null,
+        data.min_gap_slots ?? null,
+        data.value == null ? null : JSON.stringify(data.value),
+        data.description ?? null,
+      ],
+    )
+    revalidatePath('/dashboard/constraints')
   })
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/constraints')
-  return { success: true }
 }
 
 export async function toggleConstraintStatus(id: string): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { data: constraint, error: fetchError } = await supabase
-    .from('teacher_constraints')
-    .select('active')
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-    .single()
-
-  if (fetchError || !constraint) return { success: false, error: 'Restrição não encontrada.' }
-
-  const { error } = await supabase
-    .from('teacher_constraints')
-    .update({ active: !constraint.active })
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/constraints')
-  return { success: true }
+  return editorAction(async (p) => {
+    const rows = await run(
+      p.id,
+      'UPDATE teacher_constraints SET active = NOT active WHERE id = $1 AND tenant_id = $2 RETURNING id',
+      [id, p.tenant_id],
+    )
+    if (rows.length === 0) return { success: false, error: 'Restrição não encontrada.' }
+    revalidatePath('/dashboard/constraints')
+  })
 }
 
 export async function deleteConstraint(id: string): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { error } = await supabase
-    .from('teacher_constraints')
-    .delete()
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/constraints')
-  return { success: true }
+  return editorAction(async (p) => {
+    await run(p.id, 'DELETE FROM teacher_constraints WHERE id = $1 AND tenant_id = $2', [id, p.tenant_id])
+    revalidatePath('/dashboard/constraints')
+  })
 }

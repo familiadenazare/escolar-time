@@ -1,75 +1,35 @@
 'use server'
 
 import { revalidatePath } from 'next/cache'
-import { createClient } from '@/lib/supabase/server'
-import { denyIfReadOnly } from '@/lib/auth/session'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
+import { run } from '@/lib/db'
+import { editorAction, type ActionResult } from '@/lib/actions'
 
 type FormData = {
   name: string
 }
 
-type ActionResult = { success: boolean; error?: string }
-
 export async function createTeacher(data: FormData): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { error } = await supabase.from('teachers').insert({
-    tenant_id: TENANT_ID,
-    name: data.name,
+  return editorAction(async (p) => {
+    await run(p.id, 'INSERT INTO teachers (tenant_id, name) VALUES ($1, $2)', [p.tenant_id, data.name])
+    revalidatePath('/dashboard/teachers')
   })
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/teachers')
-  return { success: true }
 }
 
 export async function updateTeacher(id: string, data: FormData): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { error } = await supabase
-    .from('teachers')
-    .update({ name: data.name })
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/teachers')
-  return { success: true }
+  return editorAction(async (p) => {
+    await run(p.id, 'UPDATE teachers SET name = $1 WHERE id = $2 AND tenant_id = $3', [data.name, id, p.tenant_id])
+    revalidatePath('/dashboard/teachers')
+  })
 }
 
 export async function toggleTeacherStatus(id: string): Promise<ActionResult> {
-  const denied = await denyIfReadOnly()
-  if (denied) return denied
-
-  const supabase = await createClient()
-
-  const { data: teacher, error: fetchError } = await supabase
-    .from('teachers')
-    .select('active')
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-    .single()
-
-  if (fetchError || !teacher) return { success: false, error: 'Professor não encontrado.' }
-
-  const { error } = await supabase
-    .from('teachers')
-    .update({ active: !teacher.active })
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-
-  if (error) return { success: false, error: error.message }
-
-  revalidatePath('/dashboard/teachers')
-  return { success: true }
+  return editorAction(async (p) => {
+    const rows = await run(
+      p.id,
+      'UPDATE teachers SET active = NOT active WHERE id = $1 AND tenant_id = $2 RETURNING id',
+      [id, p.tenant_id],
+    )
+    if (rows.length === 0) return { success: false, error: 'Professor não encontrado.' }
+    revalidatePath('/dashboard/teachers')
+  })
 }

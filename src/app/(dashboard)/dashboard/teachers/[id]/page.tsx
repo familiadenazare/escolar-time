@@ -1,6 +1,6 @@
 import { notFound } from 'next/navigation'
 import Link from 'next/link'
-import { getEditorProfile } from '@/lib/auth/session'
+import { getEditorProfile, requireProfile } from '@/lib/auth/session'
 import {
   AlarmCheck,
   AlarmClock,
@@ -21,13 +21,11 @@ import {
   ShieldAlert,
   UserCircle,
 } from 'lucide-react'
-import { createClient } from '@/lib/supabase/server'
+import { db } from '@/lib/db'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
 
 // ─── Constraint meta ──────────────────────────────────────────────────────────
 
@@ -57,23 +55,34 @@ export default async function TeacherProfilePage({
   params: Promise<{ id: string }>
 }) {
   const { id } = await params
-  const supabase = await createClient()
+  const { tenant_id } = await requireProfile()
   const canEdit = !!(await getEditorProfile())
 
-  const [{ data: teacher }, { data: constraints }] = await Promise.all([
-    supabase
-      .from('teachers')
-      .select('id, name, active')
-      .eq('id', id)
-      .eq('tenant_id', TENANT_ID)
-      .single(),
-    supabase
-      .from('teacher_constraints')
-      .select('id, type, priority, days_of_week, description, active, value, time_from, time_to, slot_order, min_gap_slots')
-      .eq('teacher_id', id)
-      .eq('tenant_id', TENANT_ID)
-      .eq('active', true)
-      .order('created_at', { ascending: false }),
+  type Constraint = {
+    id: string
+    type: string
+    priority: string | null
+    days_of_week: number[] | null
+    description: string | null
+    active: boolean
+    value: unknown
+    time_from: string | null
+    time_to: string | null
+    slot_order: number | null
+    min_gap_slots: number | null
+  }
+  const [teacher, constraints] = await Promise.all([
+    db.one<{ id: string; name: string; active: boolean }>(
+      'SELECT id, name, active FROM teachers WHERE id = $1 AND tenant_id = $2',
+      [id, tenant_id],
+    ),
+    db.query<Constraint>(
+      `SELECT id, type, priority, days_of_week, description, active, value, time_from, time_to, slot_order, min_gap_slots
+         FROM teacher_constraints
+        WHERE teacher_id = $1 AND tenant_id = $2 AND active
+        ORDER BY created_at DESC`,
+      [id, tenant_id],
+    ),
   ])
 
   if (!teacher) notFound()

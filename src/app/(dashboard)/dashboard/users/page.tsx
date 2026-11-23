@@ -1,6 +1,5 @@
 import { redirect } from 'next/navigation'
-import { createClient } from '@/lib/supabase/server'
-import { adminSupabase } from '@/lib/supabase/admin'
+import { db } from '@/lib/db'
 import { getAdminProfile } from '@/lib/auth/session'
 import { UsersTable } from '@/components/users/users-table'
 
@@ -8,22 +7,19 @@ export default async function UsersPage() {
   const admin = await getAdminProfile()
   if (!admin) redirect('/dashboard')
 
-  const supabase = await createClient()
-  const { data: profiles } = await supabase
-    .from('profiles')
-    .select('id, name, email, role, active, created_at')
-    .eq('tenant_id', admin.tenant_id)
-    .order('name')
-
-  // Último acesso vem das contas de login (auth.users), só visíveis à service-role.
-  const lastSignIn = new Map<string, string | null>()
-  const { data: authUsers } = await adminSupabase.auth.admin.listUsers({ perPage: 1000 })
-  for (const u of authUsers?.users ?? []) lastSignIn.set(u.id, u.last_sign_in_at ?? null)
-
-  const users = (profiles ?? []).map((p) => ({
-    ...p,
-    last_sign_in_at: lastSignIn.get(p.id) ?? null,
-  }))
+  const users = await db.query<{
+    id: string
+    name: string
+    email: string
+    role: string
+    active: boolean
+    created_at: string
+    last_sign_in_at: string | null
+  }>(
+    `SELECT id, name, email, role, active, created_at, last_login_at AS last_sign_in_at
+       FROM profiles WHERE tenant_id = $1 ORDER BY name`,
+    [admin.tenant_id],
+  )
 
   return <UsersTable users={users} currentUserId={admin.id} />
 }

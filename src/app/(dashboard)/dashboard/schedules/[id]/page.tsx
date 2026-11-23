@@ -1,5 +1,6 @@
 import { notFound } from 'next/navigation'
-import { createClient } from '@/lib/supabase/server'
+import { db } from '@/lib/db'
+import { requireProfile } from '@/lib/auth/session'
 import { ScheduleGrid } from '@/components/schedule/schedule-grid'
 
 type Props = {
@@ -18,23 +19,34 @@ type GridSlotRow = {
 
 export default async function ScheduleDetailPage({ params }: Props) {
   const { id } = await params
-  const supabase = await createClient()
+  const { tenant_id } = await requireProfile()
 
-  const { data: schedule } = await supabase
-    .from('generated_schedules')
-    .select(
-      `id, name, status, score, violations, config_snapshot, created_at, deleted_at, deleted_reason,
-       deleted_by, replacement:generated_schedules!replaced_by(id, name)`
-    )
-    .eq('id', id)
-    .single()
+  const schedule = await db.one<{
+    id: string
+    name: string
+    status: string | null
+    score: number | null
+    violations: unknown
+    config_snapshot: unknown
+    created_at: string
+    deleted_at: string | null
+    deleted_reason: string | null
+    deleted_by: string | null
+    replacement: { id: string; name: string } | null
+    deleter: { name: string } | null
+  }>(
+    `SELECT g.id, g.name, g.status, g.score, g.violations, g.config_snapshot, g.created_at, g.deleted_at,
+            g.deleted_reason, g.deleted_by,
+            CASE WHEN r.id IS NULL THEN NULL ELSE json_build_object('id', r.id, 'name', r.name) END AS replacement,
+            CASE WHEN d.id IS NULL THEN NULL ELSE json_build_object('name', d.name) END AS deleter
+       FROM generated_schedules g
+       LEFT JOIN generated_schedules r ON r.id = g.replaced_by
+       LEFT JOIN profiles d ON d.id = g.deleted_by
+      WHERE g.id = $1 AND g.tenant_id = $2`,
+    [id, tenant_id],
+  )
 
   if (!schedule) notFound()
-
-  // deleted_by não tem FK (migration 004) — nome de quem apagou buscado à parte.
-  const { data: deleter } = schedule.deleted_by
-    ? await supabase.from('profiles').select('name').eq('id', schedule.deleted_by).maybeSingle()
-    : { data: null }
 
   if (schedule.status === 'FAILED') {
     const errors = Array.isArray(schedule.violations)
@@ -79,37 +91,37 @@ export default async function ScheduleDetailPage({ params }: Props) {
     )
   }
 
-  const { data: entries } = await supabase
-    .from('schedule_entries')
-    .select(`
-      id,
-      day_of_week,
-      locked,
-      time_slot_id,
-      time_slots ( time_grid_id ),
-      teaching_assignments (
-        id,
-        teachers ( id, name ),
-        class_subjects (
-          id,
-          group_key,
-          subjects ( id, name, color ),
-          class_groups (
-            id,
-            name,
-            school_units ( id, name )
-          )
-        )
-      )
-    `)
-    .eq('generated_schedule_id', id)
-    .order('day_of_week')
+  const entries = await db.query(
+    `SELECT e.id, e.day_of_week, e.locked, e.time_slot_id,
+            json_build_object('time_grid_id', ts.time_grid_id) AS time_slots,
+            json_build_object(
+              'id', ta.id,
+              'teachers', json_build_object('id', t.id, 'name', t.name),
+              'class_subjects', json_build_object(
+                'id', cs.id,
+                'group_key', cs.group_key,
+                'subjects', json_build_object('id', s.id, 'name', s.name, 'color', s.color),
+                'class_groups', json_build_object(
+                  'id', cg.id, 'name', cg.name,
+                  'school_units', json_build_object('id', su.id, 'name', su.name)))) AS teaching_assignments
+       FROM schedule_entries e
+       JOIN time_slots ts ON ts.id = e.time_slot_id
+       JOIN teaching_assignments ta ON ta.id = e.teaching_assignment_id
+       JOIN teachers t ON t.id = ta.teacher_id
+       JOIN class_subjects cs ON cs.id = ta.class_subject_id
+       JOIN subjects s ON s.id = cs.subject_id
+       JOIN class_groups cg ON cg.id = cs.class_group_id
+       JOIN school_units su ON su.id = cg.school_unit_id
+      WHERE e.generated_schedule_id = $1
+      ORDER BY e.day_of_week`,
+    [id],
+  )
 
   // A grade completa não pode ser derivada das entradas: intervalos e horários
   // vagos não geram schedule_entries, e cada dia tem um número diferente de aulas.
   const classGroupIds = Array.from(
     new Set(
-      (entries ?? [])
+      entries
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .map((e: any) => e.teaching_assignments?.class_subjects?.class_groups?.id)
         .filter((v): v is string => typeof v === 'string')
@@ -120,31 +132,36 @@ export default async function ScheduleDetailPage({ params }: Props) {
   // grade "ativa" pode ser outra. Turmas sem aula caem na grade ativa (fallback).
   const usedGridIds = Array.from(
     new Set(
-      (entries ?? [])
+      entries
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         .map((e: any) => (Array.isArray(e.time_slots) ? e.time_slots[0] : e.time_slots)?.time_grid_id)
         .filter((v): v is string => typeof v === 'string')
     )
   )
 
-  const gridSelect =
-    'id, class_group_id, time_slots (id, day_of_week, slot_order, start_time, end_time, type, label)'
-  const { data: usedGrids } = usedGridIds.length
-    ? await supabase.from('time_grids').select(gridSelect).in('id', usedGridIds)
-    : { data: [] }
+  type GridRow = { id: string; class_group_id: string | null; time_slots: GridSlotRow[] }
+  const GRID_SELECT = `
+    SELECT g.id, g.class_group_id,
+           coalesce((SELECT json_agg(json_build_object(
+                       'id', s.id, 'day_of_week', s.day_of_week, 'slot_order', s.slot_order,
+                       'start_time', s.start_time, 'end_time', s.end_time, 'type', s.type, 'label', s.label))
+                       FROM time_slots s WHERE s.time_grid_id = g.id), '[]') AS time_slots
+      FROM time_grids g`
+  const usedGrids = usedGridIds.length
+    ? await db.query<GridRow>(`${GRID_SELECT} WHERE g.id = ANY($1::uuid[]) AND g.tenant_id = $2`, [usedGridIds, tenant_id])
+    : []
 
-  const coveredClasses = new Set((usedGrids ?? []).map((g) => g.class_group_id))
+  const coveredClasses = new Set(usedGrids.map((g) => g.class_group_id))
   const missingClassIds = classGroupIds.filter((id) => !coveredClasses.has(id))
-  const { data: fallbackGrids } = missingClassIds.length
-    ? await supabase
-        .from('time_grids')
-        .select(gridSelect)
-        .in('class_group_id', missingClassIds)
-        .eq('active', true)
-    : { data: [] }
+  const fallbackGrids = missingClassIds.length
+    ? await db.query<GridRow>(
+        `${GRID_SELECT} WHERE g.class_group_id = ANY($1::uuid[]) AND g.active AND g.tenant_id = $2`,
+        [missingClassIds, tenant_id],
+      )
+    : []
 
   const seen = new Set<string>()
-  const grids = [...(usedGrids ?? []), ...(fallbackGrids ?? [])].filter((g) => {
+  const grids = [...usedGrids, ...fallbackGrids].filter((g) => {
     if (!g.class_group_id || seen.has(g.class_group_id)) return false
     seen.add(g.class_group_id)
     return true
@@ -152,32 +169,29 @@ export default async function ScheduleDetailPage({ params }: Props) {
 
   // Regente de cada turma: conduz as rotinas da grade (mostrada nas células de rotina).
   const gridClassIds = grids.map((g) => g.class_group_id as string)
-  const { data: regentes } = gridClassIds.length
-    ? await supabase
-        .from('class_groups')
-        .select('id, regente:teachers!homeroom_teacher_id(id, name)')
-        .in('id', gridClassIds)
-    : { data: [] }
   type Regente = { id: string; name: string }
-  const regenteByClass = new Map(
-    (regentes ?? []).map((r) => {
-      const reg = r.regente as unknown as Regente | Regente[] | null
-      return [r.id as string, (Array.isArray(reg) ? reg[0] : reg) ?? null]
-    })
-  )
+  const regentes = gridClassIds.length
+    ? await db.query<{ id: string; regente: Regente | null }>(
+        `SELECT cg.id, CASE WHEN t.id IS NULL THEN NULL ELSE json_build_object('id', t.id, 'name', t.name) END AS regente
+           FROM class_groups cg LEFT JOIN teachers t ON t.id = cg.homeroom_teacher_id
+          WHERE cg.id = ANY($1::uuid[])`,
+        [gridClassIds],
+      )
+    : []
+  const regenteByClass = new Map(regentes.map((r) => [r.id, r.regente]))
 
   const gridsByClass = grids.map((g) => ({
     classGroupId: g.class_group_id as string,
-    slots: ((g.time_slots ?? []) as GridSlotRow[]).filter((s) => s.day_of_week != null),
+    slots: g.time_slots.filter((s) => s.day_of_week != null),
     homeroomTeacher: regenteByClass.get(g.class_group_id as string) ?? null,
   }))
 
   return (
     <ScheduleGrid
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      schedule={{ ...schedule, deleter } as any}
+      schedule={schedule as any}
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      entries={(entries ?? []) as any}
+      entries={entries as any}
       grids={gridsByClass}
     />
   )

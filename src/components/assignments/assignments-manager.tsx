@@ -15,7 +15,6 @@ import {
 import { toast } from 'sonner'
 import { useCanEdit } from '@/components/auth/can-edit'
 
-import { createClient } from '@/lib/supabase/client'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -34,9 +33,8 @@ import {
   removeAssignment,
   addSubjectToClass,
   removeSubjectFromClass,
+  loadAssignmentsData,
 } from '@/app/(dashboard)/dashboard/assignments/actions'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
 
 const SHIFT_LABELS: Record<string, string> = {
   MORNING: 'Matutino',
@@ -179,39 +177,9 @@ export function AssignmentsManager({ units }: { units: Unit[] }) {
   // so the accordion content stays visible while fresh data replaces stale data
   const loadData = useCallback(async (unitId: string, silent = false) => {
     if (!silent) setLoading(true)
-    const supabase = createClient()
 
     try {
-      const [{ data: groups }, { data: teachers }, { data: subjects }] = await Promise.all([
-        supabase
-          .from('class_groups')
-          .select(`
-            id, name, shift, year,
-            class_subjects (
-              id, weekly_lessons, allow_double_lesson,
-              subjects ( id, name, code, color ),
-              teaching_assignments (
-                id, teacher_id,
-                teachers ( id, name )
-              )
-            )
-          `)
-          .eq('school_unit_id', unitId)
-          .eq('tenant_id', TENANT_ID)
-          .order('name'),
-        supabase
-          .from('teachers')
-          .select('id, name')
-          .eq('tenant_id', TENANT_ID)
-          .eq('active', true)
-          .order('name'),
-        supabase
-          .from('subjects')
-          .select('id, name, code, color')
-          .eq('tenant_id', TENANT_ID)
-          .eq('active', true)
-          .order('name'),
-      ])
+      const { groups, teachers, subjects } = await loadAssignmentsData(unitId)
 
       setClassGroups(normalizeGroups(groups as unknown[] | null))
       setAllTeachers((teachers as unknown as RawTeacher[] | null) ?? [])

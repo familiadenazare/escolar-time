@@ -1,26 +1,21 @@
 import { notFound, redirect } from 'next/navigation'
 import { getEditorProfile } from '@/lib/auth/session'
-import { createClient } from '@/lib/supabase/server'
+import { db } from '@/lib/db'
 import { UnitForm } from '@/components/units/unit-form'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
 
 export default async function EditUnitPage({
   params,
 }: {
   params: Promise<{ id: string }>
 }) {
-  if (!(await getEditorProfile())) redirect('/dashboard/units')
+  const editor = await getEditorProfile()
+  if (!editor) redirect('/dashboard/units')
 
   const { id } = await params
-  const supabase = await createClient()
-
-  const { data: unit } = await supabase
-    .from('school_units')
-    .select('id, name, code, address, active')
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-    .single()
+  const unit = await db.one<{ id: string; name: string; code: string; address: string | null; active: boolean }>(
+    'SELECT id, name, code, address, active FROM school_units WHERE id = $1 AND tenant_id = $2',
+    [id, editor.tenant_id],
+  )
 
   if (!unit) notFound()
 

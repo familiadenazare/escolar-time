@@ -1,39 +1,35 @@
 import { notFound, redirect } from 'next/navigation'
 import { getEditorProfile } from '@/lib/auth/session'
-import { createClient } from '@/lib/supabase/server'
+import { db } from '@/lib/db'
+import { listActiveTeachers, listActiveUnits } from '@/lib/queries'
 import { ClassForm } from '@/components/classes/class-form'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
 
 export default async function EditClassPage({
   params,
 }: {
   params: Promise<{ id: string }>
 }) {
-  if (!(await getEditorProfile())) redirect('/dashboard/classes')
+  const editor = await getEditorProfile()
+  if (!editor) redirect('/dashboard/classes')
 
   const { id } = await params
-  const supabase = await createClient()
 
-  const [{ data: classGroup }, { data: units }, { data: teachers }] = await Promise.all([
-    supabase
-      .from('class_groups')
-      .select('id, name, shift, year, active, school_unit_id, homeroom_teacher_id')
-      .eq('id', id)
-      .eq('tenant_id', TENANT_ID)
-      .single(),
-    supabase
-      .from('school_units')
-      .select('id, name')
-      .eq('tenant_id', TENANT_ID)
-      .eq('active', true)
-      .order('name'),
-    supabase
-      .from('teachers')
-      .select('id, name')
-      .eq('tenant_id', TENANT_ID)
-      .eq('active', true)
-      .order('name'),
+  const [classGroup, units, teachers] = await Promise.all([
+    db.one<{
+      id: string
+      name: string
+      shift: 'MORNING' | 'AFTERNOON' | 'EVENING'
+      year: number
+      active: boolean
+      school_unit_id: string
+      homeroom_teacher_id: string | null
+    }>(
+      `SELECT id, name, shift, year, active, school_unit_id, homeroom_teacher_id
+         FROM class_groups WHERE id = $1 AND tenant_id = $2`,
+      [id, editor.tenant_id],
+    ),
+    listActiveUnits(editor.tenant_id),
+    listActiveTeachers(editor.tenant_id),
   ])
 
   if (!classGroup) notFound()
@@ -44,7 +40,7 @@ export default async function EditClassPage({
         <h1 className="text-2xl font-bold text-navy">Editar Turma</h1>
         <p className="text-slate text-sm mt-1">Altere os dados da turma.</p>
       </div>
-      <ClassForm initialData={classGroup} units={units ?? []} teachers={teachers ?? []} />
+      <ClassForm initialData={classGroup} units={units} teachers={teachers} />
     </div>
   )
 }

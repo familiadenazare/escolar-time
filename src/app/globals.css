@@ -8,7 +8,7 @@
 
   --color-primary: #212F5C;
   --color-background: #FFFFFF;
-  --color-accent: #D6A441;
+  --color-accent: #D6A542;
   --color-info: #A1D4F2;
   --color-muted: #7D869C;
   --color-secondary: #048BA8;
@@ -51,18 +51,24 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-inter), system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-serif: var(--font-playfair), Georgia, serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 
   /* Navy */
   --color-navy: #212F5C;
   --color-navy-light: #2E4178;
-  --color-navy-dark: #16213F;
+  --color-navy-dark: #18234A;
+  --color-navy-deep: #141D38;
 
-  /* Ocre */
-  --color-ocre: #D6A441;
-  --color-ocre-light: #E8C577;
-  --color-ocre-dark: #B8892F;
+  /* Dourado (Manual de Marca CAFN) */
+  --color-ocre: #D6A542;
+  --color-ocre-light: #E0B75E;
+  --color-ocre-dark: #A87C24;
+  --color-gold-soft: #F7EEDC;
+
+  /* Fundo "papel" das telas com login */
+  --color-paper: #F5F4F0;
 
   /* Sky */
   --color-sky: #A1D4F2;
@@ -74,7 +80,7 @@
   --color-teal: #048BA8;
   --color-teal-light: #0FADD0;
   --color-teal-dark: #036B82;
-  --font-heading: var(--font-sans);
+  --font-heading: var(--font-serif);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -187,5 +193,14 @@
   }
   html {
     @apply font-sans;
+  }
+  /* Títulos em Playfair Display, como nos outros sistemas do CAFN. */
+  h1 {
+    font-family: var(--font-serif);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  :focus-visible {
+    outline-color: var(--color-ocre);
   }
 }

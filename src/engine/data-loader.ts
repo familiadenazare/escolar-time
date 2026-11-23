@@ -1,4 +1,4 @@
-import { adminSupabase } from '@/lib/supabase/admin'
+import { db } from '@/lib/db'
 import type {
   BaselineSchedule,
   EngineAssignment,
@@ -205,51 +205,55 @@ export async function loadEngineInput(
   vigencia?: string | null
 ): Promise<EngineInput> {
   // 1. Class groups + class_subjects (subjects + teaching_assignments) + time_grids + slots
-  const { data: classGroupsRaw, error: cgErr } = await adminSupabase
-    .from('class_groups')
-    .select(
-      `
-      id, name, school_unit_id, active, homeroom_teacher_id,
-      class_subjects (
-        id, weekly_lessons, allow_double_lesson, group_key,
-        subjects ( id, name ),
-        teaching_assignments ( id, teacher_id )
-      ),
-      time_grids!class_group_id (
-        id, class_group_id, start_time, days_of_week, active, vigencia,
-        time_slots ( id, day_of_week, slot_order, duration_minutes, type, start_time, end_time, label )
-      )
-    `
+  const classGroupsRows = await db
+    .query<RawClassGroup>(
+      `SELECT cg.id, cg.name, cg.school_unit_id, cg.active, cg.homeroom_teacher_id,
+              coalesce((
+                SELECT json_agg(json_build_object(
+                  'id', cs.id, 'weekly_lessons', cs.weekly_lessons,
+                  'allow_double_lesson', cs.allow_double_lesson, 'group_key', cs.group_key,
+                  'subjects', json_build_object('id', s.id, 'name', s.name),
+                  'teaching_assignments', (
+                    SELECT json_build_object('id', ta.id, 'teacher_id', ta.teacher_id)
+                      FROM teaching_assignments ta WHERE ta.class_subject_id = cs.id)))
+                  FROM class_subjects cs JOIN subjects s ON s.id = cs.subject_id
+                 WHERE cs.class_group_id = cg.id), '[]') AS class_subjects,
+              coalesce((
+                SELECT json_agg(json_build_object(
+                  'id', g.id, 'class_group_id', g.class_group_id, 'start_time', g.start_time,
+                  'days_of_week', g.days_of_week, 'active', g.active, 'vigencia', g.vigencia,
+                  'time_slots', coalesce((
+                    SELECT json_agg(json_build_object(
+                      'id', ts.id, 'day_of_week', ts.day_of_week, 'slot_order', ts.slot_order,
+                      'duration_minutes', ts.duration_minutes, 'type', ts.type,
+                      'start_time', ts.start_time, 'end_time', ts.end_time, 'label', ts.label))
+                      FROM time_slots ts WHERE ts.time_grid_id = g.id), '[]')))
+                  FROM time_grids g WHERE g.class_group_id = cg.id), '[]') AS time_grids
+         FROM class_groups cg
+        WHERE cg.tenant_id = $1 AND cg.active`,
+      [tenantId],
     )
-    .eq('tenant_id', tenantId)
-    .eq('active', true)
-
-  if (cgErr) throw new Error(`Falha ao carregar turmas: ${cgErr.message}`)
-
-  const classGroupsRows = (classGroupsRaw ?? []) as unknown as RawClassGroup[]
+    .catch((e: Error) => {
+      throw new Error(`Falha ao carregar turmas: ${e.message}`)
+    })
 
   // 2. Teachers + constraints
-  const { data: teachersRaw, error: tErr } = await adminSupabase
-    .from('teachers')
-    .select('id, name, active')
-    .eq('tenant_id', tenantId)
-    .eq('active', true)
+  const teachers = await db
+    .query<RawTeacher>('SELECT id, name, active FROM teachers WHERE tenant_id = $1 AND active', [tenantId])
+    .catch((e: Error) => {
+      throw new Error(`Falha ao carregar professores: ${e.message}`)
+    })
 
-  if (tErr) throw new Error(`Falha ao carregar professores: ${tErr.message}`)
-
-  const teachers = (teachersRaw ?? []) as RawTeacher[]
-
-  const { data: constraintsRaw, error: ctErr } = await adminSupabase
-    .from('teacher_constraints')
-    .select(
-      'id, teacher_id, type, priority, days_of_week, school_unit_id, subject_id, time_from, time_to, slot_order, min_gap_slots, value, active'
+  const constraintsRows = await db
+    .query<RawConstraint>(
+      `SELECT id, teacher_id, type, priority, days_of_week, school_unit_id, subject_id, time_from, time_to,
+              slot_order, min_gap_slots, value, active
+         FROM teacher_constraints WHERE tenant_id = $1 AND active`,
+      [tenantId],
     )
-    .eq('tenant_id', tenantId)
-    .eq('active', true)
-
-  if (ctErr) throw new Error(`Falha ao carregar restrições: ${ctErr.message}`)
-
-  const constraintsRows = (constraintsRaw ?? []) as RawConstraint[]
+    .catch((e: Error) => {
+      throw new Error(`Falha ao carregar restrições: ${e.message}`)
+    })
   const allConstraints = constraintsRows.map(normalizeConstraint)
   const constraintsByTeacher = new Map<string, EngineConstraint[]>()
   for (const row of constraintsRows) {
@@ -263,16 +267,15 @@ export async function loadEngineInput(
   }
 
   // 3. Global rules
-  const { data: rulesRaw, error: rErr } = await adminSupabase
-    .from('global_rules')
-    .select('type, priority, weight, params')
-    .eq('tenant_id', tenantId)
-    .eq('active', true)
+  const rulesRaw = await db
+    .query<RawGlobalRule>('SELECT type, priority, weight, params FROM global_rules WHERE tenant_id = $1 AND active', [
+      tenantId,
+    ])
+    .catch((e: Error) => {
+      throw new Error(`Falha ao carregar regras globais: ${e.message}`)
+    })
 
-  if (rErr) throw new Error(`Falha ao carregar regras globais: ${rErr.message}`)
-
-  const globalRules: EngineGlobalRule[] = (rulesRaw ?? []).map((r) => {
-    const row = r as unknown as RawGlobalRule
+  const globalRules: EngineGlobalRule[] = rulesRaw.map((row) => {
     return {
       type: row.type,
       priority: normalizePriority(row.priority),
@@ -358,12 +361,14 @@ export async function loadEngineInput(
   let baseline: BaselineSchedule | undefined
   if (baselineScheduleId) {
     try {
-      const { data: entries } = await adminSupabase
-        .from('schedule_entries')
-        .select('teaching_assignment_id, day_of_week, time_slot_id, time_slots(slot_order)')
-        .eq('generated_schedule_id', baselineScheduleId)
-      if (entries && entries.length > 0) {
-        const rows = entries as unknown as RawBaselineEntry[]
+      const rows = await db.query<RawBaselineEntry>(
+        `SELECT e.teaching_assignment_id, e.day_of_week, e.time_slot_id,
+                json_build_object('slot_order', ts.slot_order) AS time_slots
+           FROM schedule_entries e JOIN time_slots ts ON ts.id = e.time_slot_id
+          WHERE e.generated_schedule_id = $1`,
+        [baselineScheduleId],
+      )
+      if (rows.length > 0) {
         // A base pode ser de outra vigência (outra grade, outros ids de slot): a aula é
         // levada para o slot na mesma posição (dia + ordem) da grade usada agora.
         const classByAssignment = new Map(allAssignments.map((a) => [a.id, a.classGroupId]))

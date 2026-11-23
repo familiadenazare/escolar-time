@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { validateEditedSchedule } from '@/engine/index'
 import {
-  TENANT_ID,
   badRequest,
   lessonsSchema,
   loadEditableSchedule,
@@ -27,7 +26,7 @@ export async function POST(
 
   try {
     const result = await validateEditedSchedule(
-      TENANT_ID,
+      loaded.tenantId,
       parsed.data.entries,
       loaded.schedule.config_snapshot?.baselineScheduleId ?? undefined,
       loaded.schedule.baseline_weight,

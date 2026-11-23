@@ -1,15 +1,14 @@
 import { notFound, redirect } from 'next/navigation'
 import { getEditorProfile } from '@/lib/auth/session'
-import { createClient } from '@/lib/supabase/server'
+import { db } from '@/lib/db'
 import { GridForm } from '@/components/grids/grid-form'
 
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
-
-async function loadVigencias(supabase: Awaited<ReturnType<typeof createClient>>) {
-  const { data } = await supabase.from('time_grids').select('vigencia').eq('tenant_id', TENANT_ID)
-  return [...new Set((data ?? []).map((g) => g.vigencia).filter((v): v is string => !!v))].sort(
-    (a, b) => b.localeCompare(a, 'pt-BR', { numeric: true })
+async function loadVigencias(tenantId: string) {
+  const rows = await db.query<{ vigencia: string }>(
+    'SELECT DISTINCT vigencia FROM time_grids WHERE tenant_id = $1 AND vigencia IS NOT NULL',
+    [tenantId],
   )
+  return rows.map((r) => r.vigencia).sort((a, b) => b.localeCompare(a, 'pt-BR', { numeric: true }))
 }
 
 interface EditGridPageProps {
@@ -26,32 +25,45 @@ type DbSlot = {
 }
 
 export default async function EditGridPage({ params }: EditGridPageProps) {
-  if (!(await getEditorProfile())) redirect('/dashboard/grids')
+  const editor = await getEditorProfile()
+  if (!editor) redirect('/dashboard/grids')
 
   const { id } = await params
-  const supabase = await createClient()
-
-  const [{ data: grid }, { data: classGroups }, vigencias] = await Promise.all([
-    supabase
-      .from('time_grids')
-      .select(
-        'id, name, shift, start_time, days_of_week, active, vigencia, class_group_id, school_unit_id, time_slots(id, day_of_week, slot_order, duration_minutes, type, label)'
-      )
-      .eq('id', id)
-      .eq('tenant_id', TENANT_ID)
-      .single(),
-    supabase
-      .from('class_groups')
-      .select('id, name, school_units(id, name)')
-      .eq('tenant_id', TENANT_ID)
-      .eq('active', true)
-      .order('name'),
-    loadVigencias(supabase),
+  const [grid, classGroups, vigencias] = await Promise.all([
+    db.one<{
+      id: string
+      name: string
+      shift: 'MORNING' | 'AFTERNOON' | 'EVENING'
+      start_time: string | null
+      days_of_week: number[] | null
+      active: boolean
+      vigencia: string | null
+      class_group_id: string | null
+      school_unit_id: string
+      time_slots: DbSlot[]
+    }>(
+      `SELECT g.id, g.name, g.shift, g.start_time, g.days_of_week, g.active, g.vigencia, g.class_group_id, g.school_unit_id,
+              coalesce((SELECT json_agg(json_build_object(
+                          'id', s.id, 'day_of_week', s.day_of_week, 'slot_order', s.slot_order,
+                          'duration_minutes', s.duration_minutes, 'type', s.type, 'label', s.label))
+                          FROM time_slots s WHERE s.time_grid_id = g.id), '[]') AS time_slots
+         FROM time_grids g
+        WHERE g.id = $1 AND g.tenant_id = $2`,
+      [id, editor.tenant_id],
+    ),
+    db.query<{ id: string; name: string; school_units: { id: string; name: string } }>(
+      `SELECT cg.id, cg.name, json_build_object('id', su.id, 'name', su.name) AS school_units
+         FROM class_groups cg JOIN school_units su ON su.id = cg.school_unit_id
+        WHERE cg.tenant_id = $1 AND cg.active
+        ORDER BY cg.name`,
+      [editor.tenant_id],
+    ),
+    loadVigencias(editor.tenant_id),
   ])
 
   if (!grid) notFound()
 
-  const allSlots = (grid.time_slots as DbSlot[] | null) ?? []
+  const allSlots = grid.time_slots
 
   // Group by day_of_week, sorted by slot_order
   const slotsByDay: Record<number, DbSlot[]> = {}
@@ -72,7 +84,7 @@ export default async function EditGridPage({ params }: EditGridPageProps) {
         </p>
       </div>
       <GridForm
-        classGroups={classGroups ?? []}
+        classGroups={classGroups}
         vigencias={vigencias}
         initialData={{
           id: grid.id,

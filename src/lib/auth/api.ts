@@ -4,8 +4,8 @@ import { getSessionProfile, READ_ONLY_ERROR, type SessionProfile } from './sessi
 import { canEdit } from './roles'
 
 /**
- * Para rotas de API que gravam dados. Elas usam a service-role key, que ignora a
- * RLS — então o papel precisa ser conferido aqui: Visualizador recebe 403.
+ * Para rotas de API que gravam dados. O banco não tem RLS — o papel é
+ * conferido aqui: sem sessão recebe 401, Visualizador recebe 403.
  */
 export async function requireEditor(): Promise<
   { ok: true; user: SessionProfile } | { ok: false; response: NextResponse }

@@ -1,26 +1,21 @@
 import { notFound, redirect } from 'next/navigation'
 import { getEditorProfile } from '@/lib/auth/session'
-import { createClient } from '@/lib/supabase/server'
+import { db } from '@/lib/db'
 import { TeacherForm } from '@/components/teachers/teacher-form'
-
-const TENANT_ID = '00000000-0000-0000-0000-000000000001'
 
 export default async function EditTeacherPage({
   params,
 }: {
   params: Promise<{ id: string }>
 }) {
-  if (!(await getEditorProfile())) redirect('/dashboard/teachers')
+  const editor = await getEditorProfile()
+  if (!editor) redirect('/dashboard/teachers')
 
   const { id } = await params
-  const supabase = await createClient()
-
-  const { data: teacher } = await supabase
-    .from('teachers')
-    .select('id, name, active')
-    .eq('id', id)
-    .eq('tenant_id', TENANT_ID)
-    .single()
+  const teacher = await db.one<{ id: string; name: string; active: boolean }>(
+    'SELECT id, name, active FROM teachers WHERE id = $1 AND tenant_id = $2',
+    [id, editor.tenant_id],
+  )
 
   if (!teacher) notFound()
 
