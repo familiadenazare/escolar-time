@@ -1,6 +1,6 @@
 'use client'
 
-import { useSyncExternalStore } from 'react'
+import { useState, useSyncExternalStore } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import {
@@ -16,6 +16,8 @@ import {
   Wand2,
   CalendarDays,
   LogOut,
+  Menu,
+  X,
   PanelLeftClose,
   PanelLeftOpen,
   UserCog,
@@ -85,6 +87,19 @@ function getCollapsedSnapshot() {
   }
 }
 
+// Celular/tablet estreito: o menu vira gaveta (abre pelo botão da barra de cima).
+const DESKTOP_QUERY = '(min-width: 768px)'
+
+function subscribeDesktop(listener: () => void) {
+  const mq = window.matchMedia(DESKTOP_QUERY)
+  mq.addEventListener('change', listener)
+  return () => mq.removeEventListener('change', listener)
+}
+
+function getDesktopSnapshot() {
+  return window.matchMedia(DESKTOP_QUERY).matches
+}
+
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean)
   return ((parts[0]?.[0] ?? '') + (parts.length > 1 ? parts.at(-1)![0] : '')).toUpperCase() || '?'
@@ -111,7 +126,21 @@ interface SidebarProps {
 
 export function Sidebar({ userName, userEmail, role, isAdmin, canEdit }: SidebarProps) {
   const pathname = usePathname()
-  const collapsed = useSyncExternalStore(subscribeCollapsed, getCollapsedSnapshot, () => false)
+  const collapsedPref = useSyncExternalStore(subscribeCollapsed, getCollapsedSnapshot, () => false)
+  const isDesktop = useSyncExternalStore(subscribeDesktop, getDesktopSnapshot, () => true)
+  // Na gaveta do celular o menu aparece sempre inteiro.
+  const collapsed = collapsedPref && isDesktop
+  const [mobileOpen, setMobileOpen] = useState(false)
+  const [openedAt, setOpenedAt] = useState(pathname)
+  // Fecha a gaveta quando a página muda.
+  if (mobileOpen && openedAt !== pathname) {
+    setMobileOpen(false)
+  }
+
+  function openMobile() {
+    setOpenedAt(pathname)
+    setMobileOpen(true)
+  }
 
   function toggleCollapsed() {
     try {
@@ -125,10 +154,37 @@ export function Sidebar({ userName, userEmail, role, isAdmin, canEdit }: Sidebar
   }
 
   return (
+    <>
+    {/* Barra de cima no celular */}
+    <header className="sticky top-0 z-30 flex items-center gap-2.5 bg-navy-deep px-3 py-2 text-white md:hidden">
+      <button
+        onClick={openMobile}
+        aria-label="Abrir menu"
+        aria-expanded={mobileOpen}
+        className="grid h-9 w-9 flex-none cursor-pointer place-items-center rounded-[9px] bg-white/[0.07] hover:bg-white/[0.16]"
+      >
+        <Menu size={19} />
+      </button>
+      <Link href="/dashboard" className="flex min-w-0 items-center gap-2 text-white">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src="/brand/crest.png" alt="" width={22} height={28} className="h-7 w-auto flex-none" />
+        <b className="font-serif text-[17px] font-semibold">Pedagógico</b>
+      </Link>
+    </header>
+
+    {mobileOpen && (
+      <div className="fixed inset-0 z-40 bg-navy-deep/50 md:hidden" onClick={() => setMobileOpen(false)} aria-hidden />
+    )}
+
     <aside
       className={cn(
-        'sticky top-0 flex h-screen shrink-0 flex-col overflow-hidden bg-navy-deep text-white transition-[width] duration-200',
-        collapsed ? 'w-[72px]' : 'w-[264px]',
+        'flex h-screen shrink-0 flex-col overflow-hidden bg-navy-deep text-white',
+        // celular: gaveta por cima da página
+        'fixed inset-y-0 left-0 z-50 w-[264px] transition-transform duration-200',
+        mobileOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full',
+        // computador: coluna fixa, recolhível
+        'md:sticky md:top-0 md:z-auto md:translate-x-0 md:shadow-none md:transition-[width]',
+        collapsed ? 'md:w-[72px]' : 'md:w-[264px]',
       )}
     >
       {/* Marca + recolher */}
@@ -151,10 +207,17 @@ export function Sidebar({ userName, userEmail, role, isAdmin, canEdit }: Sidebar
           )}
         </Link>
         <button
+          onClick={() => setMobileOpen(false)}
+          aria-label="Fechar menu"
+          className="grid h-8 w-8 flex-none cursor-pointer place-items-center rounded-[9px] bg-white/[0.07] text-white hover:bg-white/[0.16] md:hidden"
+        >
+          <X size={17} />
+        </button>
+        <button
           onClick={toggleCollapsed}
           title={collapsed ? 'Expandir menu' : 'Recolher menu'}
           aria-label={collapsed ? 'Expandir menu' : 'Recolher menu'}
-          className="grid h-8 w-8 flex-none cursor-pointer place-items-center rounded-[9px] bg-white/[0.07] text-white hover:bg-white/[0.16]"
+          className="hidden h-8 w-8 flex-none cursor-pointer place-items-center rounded-[9px] bg-white/[0.07] text-white hover:bg-white/[0.16] md:grid"
         >
           {collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
         </button>
@@ -230,5 +293,6 @@ export function Sidebar({ userName, userEmail, role, isAdmin, canEdit }: Sidebar
         </button>
       </div>
     </aside>
+    </>
   )
 }

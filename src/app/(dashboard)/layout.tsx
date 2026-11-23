@@ -17,7 +17,7 @@ export default async function DashboardLayout({
 
   return (
     <CanEditProvider canEdit={editor}>
-      <div className="flex min-h-screen">
+      <div className="flex min-h-screen flex-col md:flex-row">
         <Sidebar
           userName={profile.name || profile.email}
           userEmail={profile.email}
@@ -25,8 +25,8 @@ export default async function DashboardLayout({
           isAdmin={profile.role === 'ADMIN'}
           canEdit={editor}
         />
-        <main className="flex-1 overflow-y-auto bg-paper">
-          <div className="p-8">
+        <main className="min-w-0 flex-1 overflow-y-auto bg-paper">
+          <div className="p-4 md:p-8">
             {children}
           </div>
         </main>
